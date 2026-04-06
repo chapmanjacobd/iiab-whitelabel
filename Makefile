@@ -1,205 +1,111 @@
 # IIAB Whitelabel Demo Server
-# Two independent deployment controls:
-#   volatile   - systemd Volatile= (no, yes, state)
-#   ram_image  - Image in host tmpfs (true/false)
+# Thin wrapper around democtl CLI
 
-.PHONY: help setup setup-certbot \
-        build-small build-medium build-large build-all \
-        deploy-all \
-        deploy-persistent deploy-volatile deploy-state \
-        deploy-ram deploy-ram-volatile deploy-ram-state \
+.PHONY: help init deploy list status apply \
+        add-small add-medium add-large \
+        remove-small remove-medium remove-large \
         rebuild-small rebuild-medium rebuild-large \
         ramfs-load ramfs-unload ramfs-status ramfs-cleanup \
-        status stop shell logs clean
+        reload certbot stop clean
 
 # Default target
 help:
-	@echo "IIAB Whitelabel Demo Server"
-	@echo ""
-	@echo "Setup:"
-	@echo "  setup           Configure host (nginx, networking, nspawn)"
-	@echo "  setup-certbot   Obtain Let's Encrypt certs for all subdomains"
-	@echo ""
-	@echo "Build:"
-	@echo "  build-small     Build small IIAB container image"
-	@echo "  build-medium    Build medium IIAB container image"
-	@echo "  build-large     Build large IIAB container image"
-	@echo "  build-all       Build all three container images"
-	@echo ""
-	@echo "Deploy (volatile + ram_image toggles):"
-	@echo "  deploy-all              Deploy with defaults (see vars/containers.yml)"
-	@echo "  deploy-persistent       volatile=no,   ram_image=no  (standard)"
-	@echo "  deploy-volatile         volatile=yes,  ram_image=no  (clean boot, disk)"
-	@echo "  deploy-state            volatile=state, ram_image=no  (/var clean, disk)"
-	@echo "  deploy-ram              volatile=no,   ram_image=yes (persistent, RAM)"
-	@echo "  deploy-ram-volatile     volatile=yes,  ram_image=yes (clean boot, RAM)"
-	@echo "  deploy-ram-state        volatile=state, ram_image=yes (/var clean, RAM)"
-	@echo ""
-	@echo "RAMFS management:"
-	@echo "  ramfs-load [edition]    Load image(s) into host tmpfs"
-	@echo "  ramfs-unload [edition]  Remove image(s) from host tmpfs"
-	@echo "  ramfs-status            Show tmpfs usage and loaded images"
-	@echo "  ramfs-cleanup           Unmount tmpfs, free all RAM"
-	@echo ""
-	@echo "Rebuild (destroy + build):"
-	@echo "  rebuild-small   Destroy and rebuild small container"
-	@echo "  rebuild-medium  Destroy and rebuild medium container"
-	@echo "  rebuild-large   Destroy and rebuild large container"
-	@echo ""
-	@echo "Operations:"
-	@echo "  status          Show running containers, images, SSL certs"
-	@echo "  stop            Stop all containers"
-	@echo "  shell-small     Get shell into small container"
-	@echo "  shell-medium    Get shell into medium container"
-	@echo "  shell-large     Get shell into large container"
-	@echo "  logs-small      Show small container journal logs"
-	@echo "  logs-medium     Show medium container journal logs"
-	@echo "  logs-large      Show large container journal logs"
-	@echo ""
-	@echo "Cleanup:"
-	@echo "  clean           Remove containers, images, RAMFS, services"
+	bash democtl help
 
-# Host setup
-setup:
-	ansible-playbook -i hosts/inventory.yml playbooks/01-host-setup.yml
+# Host bootstrap
+init:
+	bash democtl init
 
-# Certbot setup
-setup-certbot:
-	ansible-playbook -i hosts/inventory.yml playbooks/06-certbot.yml
+# Apply default config
+deploy:
+	bash democtl apply demos.sh
 
-# Build containers
-build-small:
-	bash scripts/build-container.sh small
+# List all demos
+list:
+	bash democtl list
 
-build-medium:
-	bash scripts/build-container.sh medium
+# Status of all demos (or specify a name)
+status:
+	@if [ -n "$(filter-out status,$(MAKECMDGOALS))" ]; then \
+		bash democtl status "$(filter-out status,$(MAKECMDGOALS))"; \
+	else \
+		bash democtl list; \
+	fi
 
-build-large:
-	bash scripts/build-container.sh large
+# Convenience targets for the three default demos
+add-small:
+	bash democtl add small
 
-build-all: build-small build-medium build-large
+add-medium:
+	bash democtl add medium
 
-# Deploy with all six toggle combinations
-deploy-all:
-	ansible-playbook -i hosts/inventory.yml playbooks/05-deploy-containers.yml
+add-large:
+	bash democtl add large
 
-deploy-persistent:
-	ansible-playbook -i hosts/inventory.yml playbooks/05-deploy-containers.yml \
-		-e volatile=no -e ram_image=false
+remove-small:
+	bash democtl remove small
 
-deploy-volatile:
-	ansible-playbook -i hosts/inventory.yml playbooks/05-deploy-containers.yml \
-		-e volatile=yes -e ram_image=false
+remove-medium:
+	bash democtl remove medium
 
-deploy-state:
-	ansible-playbook -i hosts/inventory.yml playbooks/05-deploy-containers.yml \
-		-e volatile=state -e ram_image=false
+remove-large:
+	bash democtl remove large
 
-deploy-ram:
-	ansible-playbook -i hosts/inventory.yml playbooks/05-deploy-containers.yml \
-		-e volatile=no -e ram_image=true
+rebuild-small:
+	bash democtl rebuild small
 
-deploy-ram-volatile:
-	ansible-playbook -i hosts/inventory.yml playbooks/05-deploy-containers.yml \
-		-e volatile=yes -e ram_image=true
+rebuild-medium:
+	bash democtl rebuild medium
 
-deploy-ram-state:
-	ansible-playbook -i hosts/inventory.yml playbooks/05-deploy-containers.yml \
-		-e volatile=state -e ram_image=true
+rebuild-large:
+	bash democtl rebuild large
+
+# Operations
+shell-small:
+	bash democtl shell small
+
+shell-medium:
+	bash democtl shell medium
+
+shell-large:
+	bash democtl shell large
+
+logs:
+	bash democtl logs $(or $(NAME),)
+
+# Infrastructure
+reload:
+	bash democtl reload
+
+certbot:
+	bash democtl certbot
 
 # RAMFS management
 ramfs-load:
-	bash scripts/ramfs-setup.sh load
+	bash democtl ramfs load
 
 ramfs-unload:
-	bash scripts/ramfs-setup.sh unload
+	bash democtl ramfs unload
 
 ramfs-status:
-	bash scripts/ramfs-setup.sh status
+	bash democtl ramfs status
 
 ramfs-cleanup:
-	bash scripts/ramfs-setup.sh cleanup
+	bash democtl ramfs cleanup
 
-# Rebuild (destroy first)
-rebuild-small:
-	-machinectl terminate iiab-small 2>/dev/null || true
-	-machinectl remove iiab-small 2>/dev/null || true
-	-rm -f /var/lib/machines/iiab-small.raw
-	-rm -f /etc/systemd/nspawn/iiab-small.nspawn
-	bash scripts/build-container.sh small
-
-rebuild-medium:
-	-machinectl terminate iiab-medium 2>/dev/null || true
-	-machinectl remove iiab-medium 2>/dev/null || true
-	-rm -f /var/lib/machines/iiab-medium.raw
-	-rm -f /etc/systemd/nspawn/iiab-medium.nspawn
-	bash scripts/build-container.sh medium
-
-rebuild-large:
-	-machinectl terminate iiab-large 2>/dev/null || true
-	-machinectl remove iiab-large 2>/dev/null || true
-	-rm -f /var/lib/machines/iiab-large.raw
-	-rm -f /etc/systemd/nspawn/iiab-large.nspawn
-	bash scripts/build-container.sh large
-
-# Operations
-status:
-	@echo "=== Running Containers ==="
-	@machinectl list
-	@echo ""
-	@echo "=== Container Images (disk) ==="
-	@ls -lh /var/lib/machines/*.raw 2>/dev/null || echo "  (none on disk)"
-	@echo ""
-	@echo "=== Container Images (RAM) ==="
-	@ls -lh /run/iiab-ramfs/*.raw 2>/dev/null || echo "  (none in RAM)"
-	@echo ""
-	@echo "=== RAMFS ==="
-	@bash scripts/ramfs-setup.sh status || true
-	@echo ""
-	@echo "=== nginx Status ==="
-	@systemctl is-active nginx
-	@echo ""
-	@echo "=== SSL Certificates ==="
-	@for domain in small.iiab.io medium.iiab.io large.iiab.io; do \
-		if [ -f /etc/letsencrypt/live/$$domain/fullchain.pem ]; then \
-			echo "$$domain: $$(openssl x509 -in /etc/letsencrypt/live/$$domain/fullchain.pem -noout -enddate 2>/dev/null)"; \
-		else \
-			echo "$$domain: NOT INSTALLED"; \
-		fi; \
+# Stop all running demos
+stop:
+	@for dir in /var/lib/iiab-demos/active/*/; do \
+		[ -d "$$dir" ] || continue; \
+		name=$$(basename "$$dir"); \
+		echo "Stopping $$name..."; \
+		machinectl terminate "$$name" 2>/dev/null || true; \
 	done
 
-stop:
-	machinectl terminate iiab-small
-	machinectl terminate iiab-medium
-	machinectl terminate iiab-large
-
-shell-small:
-	machinectl shell iiab-small
-
-shell-medium:
-	machinectl shell iiab-medium
-
-shell-large:
-	machinectl shell iiab-large
-
-logs-small:
-	machinectl status iiab-small
-
-logs-medium:
-	machinectl status iiab-medium
-
-logs-large:
-	machinectl status iiab-large
-
-# Cleanup
+# Full cleanup
 clean:
-	-machinectl terminate iiab-small iiab-medium iiab-large 2>/dev/null || true
-	-machinectl remove iiab-small iiab-medium iiab-large 2>/dev/null || true
-	-rm -f /var/lib/machines/iiab-*.raw
-	-rm -f /etc/systemd/nspawn/iiab-*.nspawn
-	-rm -rf /etc/systemd/system/systemd-nspawn@iiab-*.service.d
-	-systemctl daemon-reload
-	bash scripts/ramfs-setup.sh cleanup 2>/dev/null || true
-	@echo "All container images, RAMFS, and configurations removed"
-	@echo ""
-	@echo "To also remove SSL certificates, run: certbot delete --cert-name <domain>"
+	bash democtl remove small 2>/dev/null || true
+	bash democtl remove medium 2>/dev/null || true
+	bash democtl remove large 2>/dev/null || true
+	bash democtl ramfs cleanup 2>/dev/null || true
+	@echo "All demos removed."

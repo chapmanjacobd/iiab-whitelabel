@@ -1,66 +1,98 @@
 #!/usr/bin/env bash
-# build-container.sh - Build an IIAB container image
-# Usage: ./build-container.sh <edition> [image_path]
-#   edition: small, medium, or large
-#   image_path: optional path to Debian base image (defaults to download)
+# build-container.sh - Build an IIAB container image with arbitrary config
+# Usage:
+#   build-container.sh --name <name> --edition <edition> \
+#     --repo <repo> --branch <branch> --size <MB> \
+#     --volatile <mode> --ip <ip> [--ram-image] [--local-vars <path>]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-NSPAWN_DIR="${PROJECT_DIR}/../nspawn-loop"
+NSPAWN_DIR="${PROJECT_DIR}/nspawn-loop"
 
-EDITION="${1:?Error: Edition required (small, medium, or large)}"
-IMAGE_SOURCE="${2:-}"
+# Defaults
+NAME=""
+EDITION=""
+IIAB_REPO="https://github.com/iiab/iiab.git"
+IIAB_BRANCH="master"
+SIZE_MB=15000
+VOLATILE="state"
+IP=""
+RAM_IMAGE=false
+LOCAL_VARS=""
 
-# Load container vars
-CONTAINERS_YML="${PROJECT_DIR}/vars/containers.yml"
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --name)       NAME="$2"; shift 2 ;;
+        --edition)    EDITION="$2"; shift 2 ;;
+        --repo)       IIAB_REPO="$2"; shift 2 ;;
+        --branch)     IIAB_BRANCH="$2"; shift 2 ;;
+        --size)       SIZE_MB="$2"; shift 2 ;;
+        --volatile)   VOLATILE="$2"; shift 2 ;;
+        --ip)         IP="$2"; shift 2 ;;
+        --ram-image)  RAM_IMAGE=true; shift ;;
+        --local-vars) LOCAL_VARS="$2"; shift 2 ;;
+        *)
+            echo "Warning: Unknown option: $1" >&2
+            shift
+            ;;
+    esac
+done
 
-echo "=========================================="
-echo "Building IIAB ${EDITION} container"
-echo "=========================================="
-
-# Validate edition
-if [[ ! "$EDITION" =~ ^(small|medium|large)$ ]]; then
-    echo "Error: Edition must be 'small', 'medium', or 'large'" >&2
+# Validate required args
+if [ -z "$NAME" ]; then
+    echo "Error: --name required" >&2
+    exit 1
+fi
+if [ -z "$EDITION" ]; then
+    EDITION="$NAME"
+fi
+if [ -z "$IP" ]; then
+    echo "Error: --ip required" >&2
     exit 1
 fi
 
-# Check for nspawn-loop
-if [ ! -d "$NSPAWN_DIR" ]; then
-    echo "Error: nspawn-loop directory not found at ${NSPAWN_DIR}" >&2
-    echo "Clone it: git clone https://github.com/chapmanjacobd/nspawn-loop.git" >&2
-    exit 1
+echo "=========================================="
+echo "Building IIAB container: $NAME"
+echo "=========================================="
+echo "Edition:  $EDITION"
+echo "Branch:   $IIAB_BRANCH"
+echo "Repo:     $IIAB_REPO"
+echo "Size:     ${SIZE_MB}MB"
+echo "Volatile: $VOLATILE"
+echo "IP:       $IP"
+echo "RAM image: $RAM_IMAGE"
+echo "Local vars: ${LOCAL_VARS:-(none)}"
+
+# Determine local_vars path
+if [ -z "$LOCAL_VARS" ]; then
+    LOCAL_VARS="${PROJECT_DIR}/vars/local_vars_${EDITION}.yml"
 fi
 
-# Set image size based on edition
-case "$EDITION" in
-    small)  TARGET_MB=12000 ;;
-    medium) TARGET_MB=20000 ;;
-    large)  TARGET_MB=30000 ;;
-esac
+# Resolve to absolute path if relative
+if [[ "$LOCAL_VARS" != /* ]]; then
+    LOCAL_VARS="${PROJECT_DIR}/${LOCAL_VARS}"
+fi
 
-LOCAL_VARS="${PROJECT_DIR}/vars/local_vars_${EDITION}.yml"
 if [ ! -f "$LOCAL_VARS" ]; then
-    echo "Error: local_vars file not found: $LOCAL_VARS" >&2
-    exit 1
+    echo "Warning: local_vars not found at $LOCAL_VARS, using defaults" >&2
+    LOCAL_VARS=""
 fi
-
-echo "Edition: $EDITION"
-echo "Target size: ${TARGET_MB}MB"
-echo "Local vars: $LOCAL_VARS"
 
 # Step 1: Mount Debian image
 echo ""
 echo "=== Step 1: Preparing Debian base image ==="
+
 if [ -n "$IMAGE_SOURCE" ] && [ -f "$IMAGE_SOURCE" ]; then
-    sudo "${NSPAWN_DIR}/mount.sh" "$IMAGE_SOURCE" "$TARGET_MB"
+    sudo "${NSPAWN_DIR}/mount.sh" "$IMAGE_SOURCE" "$SIZE_MB"
 elif [ -f "${NSPAWN_DIR}/debian-13-generic-amd64.img" ]; then
-    sudo "${NSPAWN_DIR}/mount.sh" "${NSPAWN_DIR}/debian-13-generic-amd64.img" "$TARGET_MB"
+    sudo "${NSPAWN_DIR}/mount.sh" "${NSPAWN_DIR}/debian-13-generic-amd64.img" "$SIZE_MB"
 else
     echo "Downloading Debian 13 generic amd64 image..."
     sudo "${NSPAWN_DIR}/mount.sh" \
         "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw" \
-        "$TARGET_MB"
+        "$SIZE_MB"
 fi
 
 # Find the state file
@@ -70,6 +102,7 @@ if [ -z "$STATE_FILE" ]; then
     exit 1
 fi
 
+# shellcheck source=/dev/null
 source "$STATE_FILE"
 echo "Mount directory: $MOUNT_DIR"
 
@@ -79,24 +112,45 @@ echo "=== Step 2: Preparing container rootfs ==="
 
 # Install IIAB code
 mkdir -p "$MOUNT_DIR/opt/iiab"
-if [ -d "${PROJECT_DIR}/../iiab" ]; then
-    echo "Copying IIAB from local checkout..."
-    cp -R --preserve=mode,timestamps,links "${PROJECT_DIR}/../iiab" "$MOUNT_DIR/opt/iiab/"
+
+# Determine IIAB source: prefer sibling checkout, then clone
+IIAB_SOURCE="${PROJECT_DIR}/../iiab"
+if [ -d "$IIAB_SOURCE" ]; then
+    echo "Copying IIAB from local checkout: $IIAB_SOURCE"
+    cp -R --preserve=mode,timestamps,links "$IIAB_SOURCE" "$MOUNT_DIR/opt/iiab/"
 else
-    echo "Cloning IIAB from GitHub..."
-    git clone --depth 1 https://github.com/iiab/iiab.git "$MOUNT_DIR/opt/iiab/iiab"
+    echo "Cloning IIAB from $IIAB_REPO (branch: $IIAB_BRANCH)..."
+    # Handle refspec for PRs
+    if [[ "$IIAB_BRANCH" == refs/pull/* ]]; then
+        git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
+        # Fetch the specific PR ref
+        (cd "$MOUNT_DIR/opt/iiab/iiab" && \
+            git fetch --depth 1 "$IIAB_REPO" "$IIAB_BRANCH" && \
+            git checkout FETCH_HEAD)
+    else
+        git clone --depth 1 --branch "$IIAB_BRANCH" "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab" 2>/dev/null || \
+            git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
+    fi
 fi
 
 # Install IIAB configuration
 mkdir -p "$MOUNT_DIR/etc/iiab"
-cp --preserve=mode,timestamps "$LOCAL_VARS" "$MOUNT_DIR/etc/iiab/local_vars.yml"
+if [ -f "$LOCAL_VARS" ]; then
+    cp --preserve=mode,timestamps "$LOCAL_VARS" "$MOUNT_DIR/etc/iiab/local_vars.yml"
+else
+    # Create minimal config
+    cat > "$MOUNT_DIR/etc/iiab/local_vars.yml" << YAML
+# Auto-generated for demo: $NAME
+edition: $EDITION
+YAML
+fi
 
 # Disable RPi-specific settings
 sed -i '/rpi_image: True/d' "$MOUNT_DIR/etc/iiab/local_vars.yml"
 sed -i 's/^iiab_admin_user_install: True/iiab_admin_user_install: False/' "$MOUNT_DIR/etc/iiab/local_vars.yml"
 
-# Set hostname for the container
-echo "iiab-${EDITION}" > "$MOUNT_DIR/etc/hostname"
+# Set hostname
+echo "$NAME" > "$MOUNT_DIR/etc/hostname"
 
 # Disable WiFi/hostapd (not needed in containers)
 cat >> "$MOUNT_DIR/etc/iiab/local_vars.yml" << 'EOF'
@@ -164,9 +218,11 @@ echo ""
 echo "=== Step 4: Shrinking image ==="
 
 # Add metadata
-echo "iiab-${EDITION}" > "$MOUNT_DIR/.iiab-image"
+echo "$NAME" > "$MOUNT_DIR/.iiab-image"
 echo "Build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MOUNT_DIR/.iiab-image"
 echo "Edition: $EDITION" >> "$MOUNT_DIR/.iiab-image"
+echo "Branch: $IIAB_BRANCH" >> "$MOUNT_DIR/.iiab-image"
+echo "Repo: $IIAB_REPO" >> "$MOUNT_DIR/.iiab-image"
 
 # Clean up
 echo uninitialized > "$MOUNT_DIR/etc/machine-id"
@@ -181,19 +237,17 @@ echo ""
 echo "=== Step 5: Registering container image ==="
 
 IMG_FILE=$(basename "$STATE_FILE" .state)
-DEST="/var/lib/machines/iiab-${EDITION}.raw"
+DEST="/var/lib/machines/${NAME}.raw"
 
-# The shrink script outputs the image file path
 # Find the resulting image
 if [ -f "${NSPAWN_DIR}/${IMG_FILE}" ]; then
     sudo mv "${NSPAWN_DIR}/${IMG_FILE}" "$DEST"
-    echo "Image registered at: $DEST"
 elif [ -f "${NSPAWN_DIR}/${IMG_FILE}.img" ]; then
     sudo mv "${NSPAWN_DIR}/${IMG_FILE}.img" "$DEST"
-    echo "Image registered at: $DEST"
 else
     echo "Warning: Could not find resulting image file" >&2
     echo "Look in ${NSPAWN_DIR}/ for *.img files" >&2
+    exit 1
 fi
 
 echo ""
@@ -201,11 +255,3 @@ echo "=========================================="
 echo "Build complete!"
 echo "Image: $DEST"
 echo "=========================================="
-echo ""
-echo "To start the container:"
-echo "  machinectl start iiab-${EDITION}"
-echo "  systemd-nspawn -b -D /var/lib/machines/iiab-${EDITION}.raw -M iiab-${EDITION}"
-echo ""
-echo "To register as a service:"
-echo "  sudo cp /var/lib/machines/iiab-${EDITION}.raw /var/lib/machines/iiab-${EDITION}/"
-echo "  sudo systemd-nspawn --register=yes -M iiab-${EDITION}"

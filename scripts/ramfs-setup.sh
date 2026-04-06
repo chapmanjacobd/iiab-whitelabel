@@ -14,6 +14,25 @@ ACTION="${1:?Error: Action required (load, unload, status, cleanup)}"
 EDITION="${2:-}"
 RAMFS_ROOT="/run/iiab-ramfs"
 
+# Flock for concurrent safety on tmpfs operations
+LOCK_FILE="/var/lib/iiab-demos/.ramfs.lock"
+LOCK_FD=201
+
+acquire_ramfs_lock() {
+    mkdir -p "$(dirname "$LOCK_FILE")"
+    eval "exec $LOCK_FD>\"$LOCK_FILE\""
+    flock -w 10 "$LOCK_FD" || {
+        echo "Error: another ramfs operation is in progress" >&2
+        exit 1
+    }
+}
+
+release_ramfs_lock() {
+    flock -u "$LOCK_FD" 2>/dev/null || true
+}
+
+trap release_ramfs_lock EXIT
+
 # Default image sizes for estimating tmpfs requirements
 declare -A IMAGE_SIZES=( [small]=12000 [medium]=20000 [large]=30000 )
 
@@ -26,6 +45,8 @@ load_image() {
         echo "Error: Source image not found: $src" >&2
         exit 1
     fi
+
+    acquire_ramfs_lock
 
     # Create RAMFS root if needed
     if ! mountpoint -q "$RAMFS_ROOT" 2>/dev/null; then
@@ -71,6 +92,8 @@ unload_image() {
     local edition="$1"
     local dest="${RAMFS_ROOT}/iiab-${edition}.raw"
 
+    acquire_ramfs_lock
+
     if [ -f "$dest" ]; then
         echo "Removing $dest from RAM..."
         rm -f "$dest"
@@ -109,6 +132,7 @@ status() {
 }
 
 cleanup() {
+    acquire_ramfs_lock
     if mountpoint -q "$RAMFS_ROOT" 2>/dev/null; then
         echo "Unmounting RAMFS and removing all images..."
         umount "$RAMFS_ROOT"

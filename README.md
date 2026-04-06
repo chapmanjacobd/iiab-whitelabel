@@ -4,39 +4,11 @@ Demo server infrastructure for Internet-in-a-Box (IIAB) with subdomain-based con
 
 ## Architecture
 
-- **Host**: Debian 13 (amd64) KVM server at `104.255.228.224`
-- **Containers**: 3x systemd-nspawn containers running different IIAB editions
-- **Reverse Proxy**: nginx on the host routes `*.iiab.io` subdomains to containers
+- **Host**: Debian 13 (amd64) KVM server
+- **Containers**: systemd-nspawn containers running different IIAB editions
+- **Reverse Proxy**: nginx routes `*.iiab.io` subdomains to containers (dynamically generated)
 - **TLS**: Let's Encrypt certificates per subdomain via certbot
-
-### Subdomain Routing
-
-| Subdomain | Container | IIAB Edition | Description |
-|---|---|---|---|
-| `small.iiab.io` | `small` | Small | Core services only (Kiwix, Kolibri, Calibre-Web, Admin Console) |
-| `medium.iiab.io` | `medium` | Medium | Small + Nextcloud, WordPress, Sugarizer, Transmission |
-| `large.iiab.io` | `large` | Large | Full install (Gitea, JupyterHub, MediaWiki, Moodle, etc.) |
-| `*.iiab.io` (other) | — | — | Redirects to `large.iiab.io` |
-
-### Deployment Toggles
-
-Two independent options control how containers run:
-
-| `volatile` | `ram_image` | Behavior | Disk I/O | Persists | Speed |
-|---|---|---|---|---|---|
-| `no` | `no` | Persistent on disk | Yes (writes) | Yes | Normal |
-| `yes` | `no` | Full overlay, clean boot | Read-only | No (overlay) | Normal |
-| `state` | `no` | /var overlay, /usr read-only | Read-only | /usr yes, /var no | Normal |
-| `no` | `yes` | Persistent in RAM | No (after copy) | In RAM only | Fast |
-| `yes` | `yes` | Full overlay from RAM | None | No | **Fastest** |
-| `state` | `yes` | /var overlay from RAM | None | /usr yes (RAM), /var no | Fast |
-
-**Volatile modes:**
-- `no` — Standard persistent container. `/usr` and `/var` are fully read-write.
-- `yes` — Entire rootfs is a tmpfs overlay. Container starts clean, all changes discarded on stop.
-- `state` — Only `/var` is a tmpfs overlay. `/usr` stays read-only from the source image. State (logs, configs, data) resets each boot; binaries/OS never change.
-
-**Default**: `volatile: state, ram_image: true` — OS is immutable in RAM, `/var` resets each boot. Ideal for demo/kiosk: repeatable, zero writes, survives reboot (re-load images into RAM).
+- **CLI**: `democtl` manages the entire lifecycle — no hardcoded playbooks
 
 ## Quick Start
 
@@ -44,236 +16,240 @@ Two independent options control how containers run:
 
 - Debian 13 (amd64) host with root access
 - Wildcard DNS `*.iiab.io` → server IP
-- Ansible installed (`pip install ansible` or `apt install ansible`)
 
-### 1. Setup Host
-
-```bash
-make setup
-```
-
-Installs nginx, systemd-container, certbot, configures bridge networking and iptables NAT.
-
-### 2. Build Container Images
+### 1. Initialize the host
 
 ```bash
-# Build all three editions (30-60 min each)
-make build-all
-
-# Or build individually
-make build-small
-make build-medium
-make build-large
+sudo bash democtl init
 ```
 
-### 3. Obtain SSL Certificates
+Installs packages, configures bridge networking, sets up nginx skeleton.
+
+### 2. Deploy demos
 
 ```bash
-make setup-certbot
+# Apply all demos from demos.sh
+sudo bash democtl apply demos.sh
+
+# Or add individually
+sudo bash democtl add small
+sudo bash democtl add large
 ```
 
-Obtains Let's Encrypt certificates for `small.iiab.io`, `medium.iiab.io`, and `large.iiab.io` via HTTP-01 ACME challenges. Auto-renews via certbot timer.
+`apply` reads `demos.sh`, adds any missing demos, removes any extras, and regenerates nginx.
 
-### 4. Deploy Containers
+### 3. Check status
 
 ```bash
-# Deploy with defaults (volatile + ram_image from vars/containers.yml)
-make deploy-all
-
-# Or choose a specific combination:
-make deploy-persistent      # volatile=no,   ram_image=no
-make deploy-volatile        # volatile=yes,  ram_image=no
-make deploy-state           # volatile=state, ram_image=no
-make deploy-ram             # volatile=no,   ram_image=yes
-make deploy-ram-volatile    # volatile=yes,  ram_image=yes
-make deploy-ram-state       # volatile=state, ram_image=yes
+sudo bash democtl list
+sudo bash democtl status small
 ```
 
-### 5. Verify
+### 4. Get SSL certs
 
 ```bash
-# Check container status, RAMFS, SSL certs
-make status
-
-# Test HTTPS endpoints
-curl -I https://small.iiab.io
-curl -I https://medium.iiab.io
-curl -I https://large.iiab.io
+sudo bash democtl certbot
 ```
+
+## democtl CLI
+
+```
+democtl init                          Bootstrap host (packages, network, nginx)
+democtl apply [demos.sh]              Ensure all demos in config are running
+democtl add <name> [flags]            Add single demo (--bg default, returns immediately)
+democtl remove <name>                 Stop + delete demo + free resources
+democtl rebuild <name>                Remove + add
+democtl list                          Show all demos
+democtl status <name>                 Detailed status + build log
+democtl logs <name>                   Build log or container journal
+democtl shell <name>                  machinectl shell
+democtl reload                        Regenerate nginx from active demos
+democtl certbot                       Obtain/renew Let's Encrypt certs
+democtl ramfs <load|unload|status>    Manage tmpfs images
+```
+
+### Add flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--edition` | *name* | IIAB edition: small, medium, large |
+| `--repo` | `github.com/iiab/iiab.git` | IIAB git repository |
+| `--branch` | `master` | Git branch/tag/ref |
+| `--size` | 15000 | Image size in MB |
+| `--volatile` | `state` | `no` / `yes` / `state` |
+| `--ram-image` | true | Load image into host tmpfs |
+| `--no-ram-image` | — | Keep image on disk |
+| `--local-vars` | `vars/local_vars_<ed>.yml` | Path to IIAB local_vars.yml |
+| `--fallback` | false | Use as fallback for unknown subdomains |
+| `--description` | — | Human-readable description |
+| `--fg` | false | Build in foreground |
+
+### Examples
+
+```bash
+# Standard demo
+democtl add small --edition small --size 12000
+
+# Test a pull request (isolated, safe — git only fetches from configured repo)
+democtl add pr3612 \
+  --edition large \
+  --branch refs/pull/3612/head \
+  --volatile yes \
+  --description "Testing PR #3612"
+
+# Test a feature branch
+democtl add new-maps \
+  --branch feature/new-maps \
+  --volatile state
+
+# Production-grade: persistent on disk
+democtl add production \
+  --edition large \
+  --volatile no \
+  --no-ram-image
+```
+
+## demos.sh — Default configuration
+
+```bash
+# demos.sh - declarative demo definitions
+demo add small \
+  --edition small --branch master --size 12000 \
+  --volatile state --ram-image \
+  --local-vars vars/local_vars_small.yml
+
+demo add medium \
+  --edition medium --branch master --size 20000 \
+  --volatile state --ram-image \
+  --local-vars vars/local_vars_medium.yml
+
+demo add large \
+  --edition large --branch master --size 30000 \
+  --volatile state --ram-image --fallback \
+  --local-vars vars/local_vars_large.yml
+```
+
+Run `democtl apply demos.sh` to ensure these are all running. Add or remove demos in the file, then re-apply.
 
 ## Directory Structure
 
 ```
 iiab-whitelabel/
+├── democtl                    # Main CLI
+├── demos.sh                   # Default demo config
+├── Makefile                   # Thin wrapper around democtl
 ├── README.md
-├── Makefile
 ├── .gitignore
-├── hosts/
-│   └── inventory.yml
 ├── playbooks/
-│   ├── 01-host-setup.yml
-│   ├── 02-build-small.yml
-│   ├── 03-build-medium.yml
-│   ├── 04-build-large.yml
-│   ├── 05-deploy-containers.yml
-│   └── 06-certbot.yml
-├── vars/
-│   ├── containers.yml
-│   ├── local_vars_small.yml
-│   ├── local_vars_medium.yml
-│   └── local_vars_large.yml
-├── nginx/
-│   └── iiab-demo.conf
-└── scripts/
-    ├── build-container.sh     # Build IIAB inside nspawn
-    ├── container-service.sh   # Create .nspawn config
-    └── ramfs-setup.sh         # Manage tmpfs image loading
+│   ├── 01-host-setup.yml      # Host provisioning (called by democtl init)
+│   └── 06-certbot.yml         # SSL certs (called by democtl certbot)
+├── scripts/
+│   ├── build-container.sh     # Build IIAB inside nspawn (arbitrary repo/branch)
+│   ├── container-service.sh   # Create .nspawn systemd config
+│   ├── ramfs-setup.sh         # Manage tmpfs image loading
+│   └── nginx-gen.sh           # Dynamic nginx from active demos
+└── vars/
+    ├── local_vars_small.yml
+    ├── local_vars_medium.yml
+    └── local_vars_large.yml
 ```
 
-## Container Networking
+## Deployment Modes
 
-Containers communicate via a private bridge network (`10.0.3.0/24`):
+Two independent toggles:
 
-| Container | IP | Port |
-|---|---|---|
-| small | 10.0.3.10 | 80 |
-| medium | 10.0.3.20 | 80 |
-| large | 10.0.3.30 | 80 |
+| `volatile` | `ram_image` | Behavior | Disk I/O | Speed |
+|---|---|---|---|---|
+| `no` | `no` | Persistent on disk | Writes | Normal |
+| `yes` | `no` | Clean boot, image on disk | Read-only | Normal |
+| `state` | `no` | /var overlay, /usr read-only | Read-only | Normal |
+| `no` | `yes` | Persistent in RAM | No (after copy) | Fast |
+| `yes` | `yes` | Clean boot from RAM | None | **Fastest** |
+| `state` | `yes` | /var overlay from RAM | None | Fast |
 
-## Common Operations
+**Default**: `volatile: state, ram_image: true` — OS immutable in RAM, `/var` resets each boot.
+
+## Resource Management
+
+`democtl add` checks resources **before** starting a build:
+
+- **Disk**: If `--no-ram-image`, verifies ≥ size + 2GB free on `/var/lib/machines`
+- **RAM**: If `--ram-image`, verifies ≥ size + 512MB available RAM
+
+If resources are insufficient, it prints what's needed vs available and aborts cleanly. Allocations are tracked per-demo and freed on `democtl remove`.
 
 ```bash
-# Get a shell inside a container
-make shell-small
-make shell-medium
-make shell-large
-
-# Check container logs
-make logs-small
-
-# Stop all containers
-make stop
-
-# Rebuild a single container (destroy + rebuild)
-make rebuild-small
-
-# Clean everything
-make clean
+democtl list    # Shows RAM allocation per demo
 ```
-
-## RAMFS Management
-
-When `ram_image: true`, images are loaded into a host tmpfs mount at `/run/iiab-ramfs/`:
-
-```bash
-# Load all images into RAM
-make ramfs-load
-
-# Load a specific image
-bash scripts/ramfs-setup.sh load small
-
-# Check RAM usage
-make ramfs-status
-
-# Unload a specific image
-bash scripts/ramfs-setup.sh unload small
-
-# Free all RAM
-make ramfs-cleanup
-```
-
-The tmpfs is sized to fit all images with 20% headroom. Images are copied (not moved) from disk, so the source remains intact.
 
 ## How It Works
 
-### `volatile` (systemd Volatile=)
+### Adding a demo
 
-Controls what parts of the container filesystem are writable:
+1. `democtl add` parses args, runs resource pre-flight checks
+2. Assigns next free IP from the subnet pool (`10.0.3.2`, `.3`, `.4`...)
+3. Writes config to `/var/lib/iiab-demos/active/<name>/`
+4. Forks `build-container.sh` in background (returns immediately)
+5. Background: clones IIAB → installs in nspawn → shrinks image → imports with machinectl
+6. On success: registers container, starts it, regenerates nginx
 
-- **`no`** — Standard persistent container. Both `/usr` and `/var` are fully read-write against the source image.
+### nginx generation
 
-- **`yes`** — Full overlay. The entire root filesystem is a tmpfs overlay on top of the read-only image. Container starts clean. All changes are discarded when the container stops.
+`scripts/nginx-gen.sh` reads all active demos from `/var/lib/iiab-demos/active/*/config` and generates:
+- One `upstream` + `server` block per demo
+- ACME challenge locations on port 80 for all subdomains
+- Fallback server for unknown `*.iiab.io` (uses the demo marked `--fallback`)
 
-- **`state`** — State overlay. Only `/var` is a tmpfs overlay (writable, discarded on stop). `/usr` stays read-only from the source image. This means logs, configs, databases, and user data reset each boot, but the OS/binaries are immutable. Ideal for demos where you want a consistent environment but don't care about accumulated state.
+Called automatically after each demo builds successfully, or via `democtl reload`.
 
-### `ram_image` (tmpfs on host)
-The `.raw` image file is copied into a tmpfs mount on the host (`/run/iiab-ramfs/`). The container then boots from this RAM copy. After the initial `cp`, all I/O is against RAM — no disk reads or writes. This is independent of `volatile`.
+### PR / arbitrary branch safety
 
-### Combined: `volatile: state, ram_image: true`
-This is the "immutable demo" mode:
-1. Image is loaded into host tmpfs (once, takes ~10-30s per image)
-2. Container boots with `/usr` read-only from RAM, `/var` as a volatile overlay
-3. Zero disk I/O — the container is fully air-gapped from storage
-4. `/var` resets each container stop/start (logs, configs, user data)
-5. `/usr` is immutable — OS and installed apps never change
-6. On host reboot: images must be re-loaded into tmpfs (`make ramfs-load`)
+- `--branch` can be any git ref: branch, tag, `refs/pull/NNNN/head`, commit hash
+- Git only fetches from the explicitly configured `--repo` URL
+- The `--risky` IIAB installer flag is controlled by the host admin
+- Each build runs in an isolated nspawn container with its own network namespace
 
-## SSL Certificate Management
-
-```bash
-# Check certificate status
-certbot certificates
-
-# Force renew all certificates
-certbot renew --force-renewal
-
-# Delete a certificate
-certbot delete --cert-name small.iiab.io
-
-# Certificates auto-renew via systemd timer
-systemctl status certbot.timer
-```
-
-## Rebuilding
-
-To update an IIAB edition with the latest code from the `iiab` repo:
+## Makefile shortcuts
 
 ```bash
-make rebuild-small    # Destroy + rebuild small container
-make rebuild-medium
-make rebuild-large
+make init             # Bootstrap host
+make deploy           # Apply demos.sh
+make list             # List all demos
+make add-small        # Add small demo
+make rebuild-large    # Rebuild large demo
+make ramfs-status     # Check RAM usage
+make stop             # Stop all demos
+make clean            # Remove everything
 ```
 
 ## Troubleshooting
 
+### Build failed
+```bash
+democtl status <name>     # Check status
+democtl logs <name>       # View build log
+tail -f /var/lib/iiab-demos/active/<name>/build.log
+```
+
+### Not enough RAM
+```bash
+democtl list              # See allocations
+democtl remove <name>     # Free resources
+democtl ramfs status      # Check tmpfs usage
+democtl ramfs cleanup     # Free all RAM
+```
+
 ### Container won't start
 ```bash
-# Check journal logs
-journalctl -u systemd-nspawn@iiab-small.service
-
-# Check the .nspawn config
-cat /etc/systemd/nspawn/iiab-small.nspawn
+journalctl -u systemd-nspawn@<name>.service
+cat /etc/systemd/nspawn/<name>.nspawn
 ```
 
-### nginx returns 502 Bad Gateway
+### nginx returns 502
 ```bash
-# Verify container is running
-machinectl list
-
-# Check container networking
-machinectl shell iiab-small ip addr
-```
-
-### Not enough RAM for ram_image
-```bash
-# Check available memory
-free -h
-
-# Unload large images you don't need
-bash scripts/ramfs-setup.sh unload large
-
-# Deploy without ram_image for large
-ansible-playbook -i hosts/inventory.yml playbooks/05-deploy-containers.yml \
-  -e 'containers={"large":{"edition":"large","ip":"10.0.3.30","ram_image":false}}'
-```
-
-### SSL certificate issues
-```bash
-# Verify certs exist
-ls -la /etc/letsencrypt/live/small.iiab.io/
-
-# Test nginx config
-nginx -t
+democtl list              # Verify container is running
+democtl shell <name>      # Check inside container
+machinectl shell <name> ip addr
 ```
 
 ## License

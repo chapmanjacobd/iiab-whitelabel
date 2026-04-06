@@ -1,0 +1,976 @@
+#!/usr/bin/env bash
+# democtl - Manage IIAB whitelabel demo containers
+# Usage: democtl <command> [args]
+set -euo pipefail
+
+###############################################################################
+# Constants and state paths
+###############################################################################
+STATE_DIR="/var/lib/iiab-demos"
+ACTIVE_DIR="$STATE_DIR/active"
+RESOURCE_FILE="$STATE_DIR/resources"
+DEMO_SUBNET="10.0.3.0/24"
+DEMO_GW="10.0.3.1"
+SUBNET_BASE="10.0.3"
+BRIDGE="iiab-br0"
+DISK_BASE=500  # MB base image + OS overhead buffer
+DISK_BUFFER=2000  # Extra MB buffer per non-ram-image demo
+RAM_BUFFER=512    # Extra MB buffer per ram-image demo
+
+NSPAWN_DIR="${STATE_DIR}/nspawn-loop"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
+PLAYBOOKS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/playbooks"
+
+###############################################################################
+# Flock-based resource protection
+###############################################################################
+LOCK_FILE="$STATE_DIR/.democtl.lock"
+LOCK_FD=200
+
+# Acquire an exclusive lock. Non-blocking by default — errors out immediately
+# if the lock is held, so concurrent adds fail cleanly instead of racing.
+acquire_lock() {
+    local timeout="${1:--1}"  # -1 = wait forever, 0 = non-blocking
+    eval "exec $LOCK_FD>$LOCK_FILE"
+    if [ "$timeout" = "0" ]; then
+        if ! flock -n "$LOCK_FD"; then
+            echo "Error: another democtl operation is in progress (lock held)." >&2
+            echo "  If no other democtl is running, remove stale lock:" >&2
+            echo "    rm -f $LOCK_FILE" >&2
+            return 1
+        fi
+    else
+        flock "$LOCK_FD"
+    fi
+}
+
+release_lock() {
+    flock -u "$LOCK_FD" 2>/dev/null || true
+}
+
+###############################################################################
+# Utility functions
+###############################################################################
+ensure_root() {
+    if [ "$EUID" -ne 0 ]; then
+        exec sudo "$0" "$@"
+    fi
+}
+
+ensure_state_dirs() {
+    mkdir -p "$STATE_DIR" "$ACTIVE_DIR"
+    if [ ! -f "$RESOURCE_FILE" ]; then
+        local disk_total ram_total
+        disk_total=$(df -m /var/lib/machines 2>/dev/null | awk 'NR==2 {print $2}' || echo 50000)
+        ram_total=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+        cat > "$RESOURCE_FILE" << EOF
+DISK_TOTAL=${disk_total}
+DISK_ALLOCATED=0
+RAM_TOTAL=${ram_total}
+RAM_ALLOCATED=0
+EOF
+    fi
+}
+
+load_resources() {
+    # shellcheck source=/dev/null
+    source "$RESOURCE_FILE"
+}
+
+save_resources() {
+    cat > "$RESOURCE_FILE" << EOF
+DISK_TOTAL=${DISK_TOTAL}
+DISK_ALLOCATED=${DISK_ALLOCATED}
+RAM_TOTAL=${RAM_TOTAL}
+RAM_ALLOCATED=${RAM_ALLOCATED}
+EOF
+}
+
+# Parse a demo config file and set variables
+load_demo_config() {
+    local name="$1"
+    local dir="$ACTIVE_DIR/$name"
+    if [ ! -f "$dir/config" ]; then
+        echo "Error: No config found for demo '$name'" >&2
+        return 1
+    fi
+    # shellcheck source=/dev/null
+    source "$dir/config"
+    DEMO_NAME="$name"
+    DEMO_IP=$(cat "$dir/ip")
+    DEMO_STATUS=$(cat "$dir/status" 2>/dev/null || echo "unknown")
+}
+
+# Get the next available IP in the subnet. MUST be called under lock.
+next_ip() {
+    local used_ips=()
+    if [ -d "$ACTIVE_DIR" ]; then
+        while IFS= read -r ip_file; do
+            used_ips+=("$(cat "$ip_file")")
+        done < <(find "$ACTIVE_DIR" -name ip -type f 2>/dev/null)
+    fi
+
+    for i in $(seq 2 254); do
+        local candidate="${SUBNET_BASE}.${i}"
+        local in_use=false
+        for used in "${used_ips[@]+"${used_ips[@]}"}"; do
+            if [ "$used" = "$candidate" ]; then
+                in_use=true
+                break
+            fi
+        done
+        if ! $in_use; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "Error: No available IPs in ${DEMO_SUBNET}" >&2
+    return 1
+}
+
+log_demo() {
+    local name="$1"
+    shift
+    echo "[$(date -u +%H:%M:%S)] [$name] $*"
+}
+
+###############################################################################
+# Resource pre-flight checks (MUST be called under lock)
+###############################################################################
+check_resources() {
+    local name="$1"
+    local size_mb="$2"
+    local ram_image="$3"
+
+    load_resources
+
+    if $ram_image; then
+        local ram_avail=$(( RAM_TOTAL - RAM_ALLOCATED - RAM_BUFFER ))
+        if [ "$size_mb" -gt "$ram_avail" ]; then
+            echo "Error: Insufficient RAM for demo '$name'." >&2
+            echo "  Need: ~$(( size_mb + RAM_BUFFER ))MB" >&2
+            echo "  Available: ${ram_avail}MB (${RAM_TOTAL}MB total - ${RAM_ALLOCATED}MB allocated - ${RAM_BUFFER}MB buffer)" >&2
+            echo "" >&2
+            echo "  Options:" >&2
+            echo "    Remove some demos: democtl remove <name>" >&2
+            echo "    Add without ram-image: --no-ram-image" >&2
+            echo "    Free all RAMFS: democtl ramfs cleanup" >&2
+            return 1
+        fi
+    else
+        local disk_avail
+        disk_avail=$(df -m /var/lib/machines 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
+        local needed=$(( size_mb + DISK_BASE + DISK_BUFFER ))
+        if [ "$needed" -gt "$disk_avail" ]; then
+            echo "Error: Insufficient disk space for demo '$name'." >&2
+            echo "  Need: ~${needed}MB (image: ${size_mb}MB + overhead)" >&2
+            echo "  Available: ${disk_avail}MB" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+allocate_resources() {
+    local name="$1"
+    local size_mb="$2"
+    local ram_image="$3"
+
+    load_resources
+    if $ram_image; then
+        RAM_ALLOCATED=$(( RAM_ALLOCATED + size_mb ))
+    fi
+    save_resources
+}
+
+free_resources() {
+    local name="$1"
+
+    local dir="$ACTIVE_DIR/$name"
+    if [ -f "$dir/config" ]; then
+        # shellcheck source=/dev/null
+        local ram_image=false
+        if grep -q '^RAM_IMAGE=true$' "$dir/config" 2>/dev/null; then
+            ram_image=true
+        fi
+        local size_mb=0
+        if grep -q '^IMAGE_SIZE_MB=' "$dir/config" 2>/dev/null; then
+            size_mb=$(grep '^IMAGE_SIZE_MB=' "$dir/config" | cut -d= -f2)
+        fi
+
+        load_resources
+        if $ram_image; then
+            RAM_ALLOCATED=$(( RAM_ALLOCATED - size_mb ))
+            if [ "$RAM_ALLOCATED" -lt 0 ]; then
+                RAM_ALLOCATED=0
+            fi
+        fi
+        save_resources
+    fi
+}
+
+###############################################################################
+# democtl init
+###############################################################################
+cmd_init() {
+    ensure_root "$@"
+    echo "=== Initializing IIAB demo server host ==="
+    if [ -f "$PLAYBOOKS_DIR/01-host-setup.yml" ]; then
+        ansible-playbook "$PLAYBOOKS_DIR/01-host-setup.yml"
+    else
+        echo "Playbook 01-host-setup.yml not found, installing manually..."
+        install_packages
+        setup_network
+        setup_nginx
+    fi
+    ensure_state_dirs
+    echo ""
+    echo "Host initialized. Now add demos with:"
+    echo "  democtl add small"
+    echo "  democtl apply demos.sh"
+}
+
+install_packages() {
+    apt-get update
+    apt-get install -y \
+        nginx systemd-container debootstrap parted jq e2fsprogs dosfstools \
+        psmisc iptables bridge-utils expect curl git \
+        certbot python3-certbot-nginx
+}
+
+setup_network() {
+    sysctl -w net.ipv4.ip_forward=1
+    systemctl enable --now systemd-networkd
+    systemctl enable --now systemd-resolved
+    mkdir -p /var/lib/machines
+}
+
+setup_nginx() {
+    mkdir -p /var/www/certbot /etc/nginx/sites-enabled
+    ln -sf /etc/nginx/sites-available/iiab-demo.conf /etc/nginx/sites-enabled/ 2>/dev/null || true
+}
+
+###############################################################################
+# democtl add
+###############################################################################
+cmd_add() {
+    ensure_root "$@"
+
+    # Defaults
+    local name="" edition="" branch="master"
+    local repo="https://github.com/iiab/iiab.git"
+    local size_mb=15000 volatile="state" ram_image=true
+    local local_vars="" fallback=false description=""
+    local foreground=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            add) shift ;;  # skip 'add' from parsed demos.sh
+            --edition)    edition="$2"; shift 2 ;;
+            --branch)     branch="$2"; shift 2 ;;
+            --repo)       repo="$2"; shift 2 ;;
+            --size)       size_mb="$2"; shift 2 ;;
+            --volatile)   volatile="$2"; shift 2 ;;
+            --ram-image)  ram_image=true; shift ;;
+            --no-ram-image) ram_image=false; shift ;;
+            --local-vars) local_vars="$2"; shift 2 ;;
+            --fallback)   fallback=true; shift ;;
+            --description) description="$2"; shift 2 ;;
+            --fg)         foreground=true; shift ;;
+            *)
+                if [ -z "$name" ]; then
+                    name="$1"; shift
+                else
+                    echo "Warning: Unknown argument: $1" >&2
+                    shift
+                fi
+                ;;
+        esac
+    done
+
+    if [ -z "$name" ]; then
+        echo "Error: demo name required" >&2
+        echo "Usage: democtl add <name> --edition <edition> [--branch <branch>] ..." >&2
+        return 1
+    fi
+
+    if [ -z "$edition" ]; then
+        edition="$name"
+    fi
+
+    ensure_state_dirs
+
+    # Acquire lock for: check resources → allocate → assign IP → write config
+    acquire_lock 0 || return 1
+    trap release_lock EXIT
+
+    # Check if demo already exists (under lock)
+    if [ -d "$ACTIVE_DIR/$name" ]; then
+        echo "Error: demo '$name' already exists. Use 'democtl rebuild $name' to recreate." >&2
+        release_lock
+        trap - EXIT
+        return 1
+    fi
+
+    # Resource pre-flight (under lock)
+    if ! check_resources "$name" "$size_mb" "$ram_image"; then
+        release_lock
+        trap - EXIT
+        return 1
+    fi
+
+    # Allocate resources (under lock)
+    allocate_resources "$name" "$size_mb" "$ram_image"
+
+    # Assign IP (under lock)
+    local ip
+    ip=$(next_ip)
+
+    # Create demo directory structure (under lock)
+    local demo_dir="$ACTIVE_DIR/$name"
+    mkdir -p "$demo_dir"
+
+    # Write config (under lock)
+    cat > "$demo_dir/config" << EOF
+DEMO_NAME="$name"
+SUBDOMAIN="${name}"
+EDITION="$edition"
+IIAB_REPO="$repo"
+IIAB_BRANCH="$branch"
+IMAGE_SIZE_MB=$size_mb
+VOLATILE="$volatile"
+RAM_IMAGE=$ram_image
+LOCAL_VARS="$local_vars"
+FALLBACK=$fallback
+DESCRIPTION="$description"
+EOF
+
+    echo "$ip" > "$demo_dir/ip"
+    echo "pending" > "$demo_dir/status"
+    echo "" > "$demo_dir/build.log"
+
+    # Release lock — the build runs independently now
+    release_lock
+    trap - EXIT
+
+    echo "Demo '$name' queued (subdomain: ${name}.iiab.io, IP: $ip)"
+
+    if $foreground; then
+        build_demo "$name"
+    else
+        # Fork build in background
+        (
+            build_demo "$name" >> "$demo_dir/build.log" 2>&1
+        ) &
+        local pid=$!
+        echo "$pid" > "$demo_dir/build.pid"
+        echo "Build started in background (PID: $pid)"
+        echo "  democtl status $name   # Check progress"
+        echo "  democtl logs $name     # Follow build log"
+    fi
+}
+
+###############################################################################
+# build_demo — background build process
+###############################################################################
+build_demo() {
+    local name="$1"
+    local demo_dir="$ACTIVE_DIR/$name"
+
+    log_demo "$name" "Starting build..."
+    echo "building" > "$demo_dir/status"
+
+    # Load config
+    # shellcheck source=/dev/null
+    source "$demo_dir/config"
+
+    local ip
+    ip=$(cat "$demo_dir/ip")
+
+    # Ensure nspawn-loop is available
+    if [ ! -d "$NSPAWN_DIR" ]; then
+        log_demo "$name" "Cloning nspawn-loop..."
+        mkdir -p "$STATE_DIR"
+        git clone --depth 1 https://github.com/chapmanjacobd/nspawn-loop.git "$NSPAWN_DIR" 2>&1 || {
+            log_demo "$name" "Failed to clone nspawn-loop"
+            echo "failed" > "$demo_dir/status"
+            return 1
+        }
+    fi
+
+    # Ensure nspawn-loop scripts are accessible
+    if [ ! -d "$SCRIPTS_DIR" ] && [ -d "$NSPAWN_DIR" ]; then
+        # If our scripts dir doesn't exist, use nspawn-loop directly
+        log_demo "$name" "Using nspawn-loop at $NSPAWN_DIR"
+    fi
+
+    # Build the container image using build-container.sh
+    local build_script="${SCRIPTS_DIR}/build-container.sh"
+    if [ ! -x "$build_script" ]; then
+        log_demo "$name" "build-container.sh not found at $build_script, trying nspawn-loop..."
+        build_script="${NSPAWN_DIR}/build-container.sh"
+    fi
+
+    local build_args=(
+        "--name" "$name"
+        "--edition" "$EDITION"
+        "--repo" "$IIAB_REPO"
+        "--branch" "$IIAB_BRANCH"
+        "--size" "$IMAGE_SIZE_MB"
+        "--volatile" "$VOLATILE"
+        "--ip" "$ip"
+    )
+
+    if [ "$RAM_IMAGE" = "true" ]; then
+        build_args+=("--ram-image")
+    fi
+
+    if [ -n "$LOCAL_VARS" ]; then
+        build_args+=("--local-vars" "$LOCAL_VARS")
+    fi
+
+    log_demo "$name" "Building: edition=$EDITION branch=$IIAB_BRANCH volatile=$VOLATILE ram_image=$RAM_IMAGE"
+    log_demo "$name" "This will take 30-60 minutes..."
+
+    if bash "$build_script" "${build_args[@]}"; then
+        log_demo "$name" "Build complete!"
+    else
+        log_demo "$name" "Build FAILED!"
+        echo "failed" > "$demo_dir/status"
+        return 1
+    fi
+
+    # Load RAM image if needed
+    if [ "$RAM_IMAGE" = "true" ] && [ -f "$SCRIPTS_DIR/ramfs-setup.sh" ]; then
+        log_demo "$name" "Loading image into RAM..."
+        if bash "$SCRIPTS_DIR/ramfs-setup.sh" load "$name" >> "$demo_dir/build.log" 2>&1; then
+            log_demo "$name" "Image loaded into RAM"
+        else
+            log_demo "$name" "Warning: Failed to load image into RAM, using disk"
+        fi
+    fi
+
+    # Create .nspawn service files
+    local service_script="${SCRIPTS_DIR}/container-service.sh"
+    local svc_args=("$name" "$ip" "--volatile=$VOLATILE")
+    if [ "$RAM_IMAGE" = "true" ]; then
+        svc_args+=("--ram-image")
+    fi
+
+    if [ -x "$service_script" ]; then
+        bash "$service_script" "${svc_args[@]}"
+    fi
+
+    # Import and start with machinectl
+    local image_path
+    if [ "$RAM_IMAGE" = "true" ] && [ -f "/run/iiab-ramfs/${name}.raw" ]; then
+        image_path="/run/iiab-ramfs/${name}.raw"
+    else
+        image_path="/var/lib/machines/${name}.raw"
+    fi
+
+    if [ ! -f "$image_path" ]; then
+        log_demo "$name" "Error: Image not found at $image_path"
+        echo "failed" > "$demo_dir/status"
+        return 1
+    fi
+
+    log_demo "$name" "Importing image..."
+    machinectl remove "$name" 2>/dev/null || true
+    machinectl import-raw "$image_path" "$name" 2>&1 || true
+
+    log_demo "$name" "Starting container..."
+    machinectl start "$name"
+
+    # Regenerate nginx
+    log_demo "$name" "Updating nginx configuration..."
+    if [ -x "$SCRIPTS_DIR/nginx-gen.sh" ]; then
+        bash "$SCRIPTS_DIR/nginx-gen.sh"
+    fi
+
+    echo "running" > "$demo_dir/status"
+    log_demo "$name" "Demo is now running!"
+}
+
+###############################################################################
+# democtl remove
+###############################################################################
+cmd_remove() {
+    ensure_root "$@"
+    local name="${1:?Error: demo name required}"
+
+    local demo_dir="$ACTIVE_DIR/$name"
+    if [ ! -d "$demo_dir" ]; then
+        echo "Error: demo '$name' not found" >&2
+        return 1
+    fi
+
+    echo "Removing demo '$name'..."
+
+    # Stop container
+    machinectl terminate "$name" 2>/dev/null || true
+    machinectl remove "$name" 2>/dev/null || true
+
+    # Kill any running build
+    if [ -f "$demo_dir/build.pid" ]; then
+        local pid
+        pid=$(cat "$demo_dir/build.pid")
+        kill "$pid" 2>/dev/null || true
+        rm -f "$demo_dir/build.pid"
+    fi
+
+    # Acquire lock for: read config → free resources → cleanup
+    acquire_lock 0 || return 1
+    trap release_lock EXIT
+
+    # Free resources (under lock)
+    free_resources "$name"
+
+    # Remove from RAMFS if loaded
+    if [ -x "$SCRIPTS_DIR/ramfs-setup.sh" ]; then
+        bash "$SCRIPTS_DIR/ramfs-setup.sh" unload "$name" 2>/dev/null || true
+    fi
+
+    # Remove image
+    rm -f "/var/lib/machines/${name}.raw"
+    rm -f "/run/iiab-ramfs/${name}.raw"
+
+    # Remove .nspawn config
+    rm -f "/etc/systemd/nspawn/${name}.nspawn"
+    rm -rf "/etc/systemd/system/systemd-nspawn@${name}.service.d"
+
+    # Remove demo state (under lock — last step frees the IP slot)
+    rm -rf "$demo_dir"
+
+    # Release lock
+    release_lock
+    trap - EXIT
+
+    echo "Demo '$name' removed."
+
+    # Regenerate nginx
+    if [ -x "$SCRIPTS_DIR/nginx-gen.sh" ]; then
+        bash "$SCRIPTS_DIR/nginx-gen.sh"
+    fi
+}
+
+###############################################################################
+# democtl rebuild
+###############################################################################
+cmd_rebuild() {
+    ensure_root "$@"
+    local name="${1:?Error: demo name required}"
+
+    # Save config before removing
+    local demo_dir="$ACTIVE_DIR/$name"
+    if [ ! -d "$demo_dir" ] || [ ! -f "$demo_dir/config" ]; then
+        echo "Error: demo '$name' not found" >&2
+        return 1
+    fi
+
+    local saved_config
+    saved_config=$(cat "$demo_dir/config")
+
+    cmd_remove "$name"
+
+    # Re-add with saved config
+    echo "$saved_config" | while IFS='=' read -r key value; do
+        case "$key" in
+            EDITION)       edition="$value" ;;
+            IIAB_BRANCH)   branch="$value" ;;
+            IIAB_REPO)     repo="$value" ;;
+            IMAGE_SIZE_MB) size_mb="$value" ;;
+            VOLATILE)      volatile="$value" ;;
+            RAM_IMAGE)     ram_image=$value ;;
+            LOCAL_VARS)    local_vars="$value" ;;
+            FALLBACK)      fallback=$value ;;
+            DESCRIPTION)   description="$value" ;;
+        esac
+    done
+
+    local add_args=("$name" "--edition" "${edition:-$name}")
+    [ -n "${branch:-}" ] && add_args+=("--branch" "$branch")
+    [ -n "${repo:-}" ] && add_args+=("--repo" "$repo")
+    [ -n "${size_mb:-}" ] && add_args+=("--size" "${size_mb:-15000}")
+    [ -n "${volatile:-}" ] && add_args+=("--volatile" "${volatile:-state}")
+    [ "${ram_image:-true}" = "false" ] && add_args+=("--no-ram-image")
+    [ -n "${local_vars:-}" ] && add_args+=("--local-vars" "$local_vars")
+    [ "${fallback:-false}" = "true" ] && add_args+=("--fallback")
+    [ -n "${description:-}" ] && add_args+=("--description" "$description")
+
+    cmd_add "${add_args[@]}"
+}
+
+###############################################################################
+# democtl list
+###############################################################################
+cmd_list() {
+    ensure_root "$@"
+    ensure_state_dirs
+
+    # Load resources
+    load_resources
+
+    printf "%-15s %-20s %-12s %-10s %-10s %s\n" \
+        "NAME" "SUBDOMAIN" "IP" "STATUS" "RAM/MB" "DESCRIPTION"
+    printf "%-15s %-20s %-12s %-10s %-10s %s\n" \
+        "----" "---------" "--" "------" "------" "-----------"
+
+    local total_ram_used=0
+    for demo_dir in "$ACTIVE_DIR"/*/; do
+        [ -d "$demo_dir" ] || continue
+        local name
+        name=$(basename "$demo_dir")
+        # shellcheck source=/dev/null
+        source "$demo_dir/config"
+        local ip
+        ip=$(cat "$demo_dir/ip" 2>/dev/null || echo "?")
+        local status
+        status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+        local ram_display="-"
+        if [ "$RAM_IMAGE" = "true" ]; then
+            ram_display="${IMAGE_SIZE_MB}M"
+            total_ram_used=$(( total_ram_used + IMAGE_SIZE_MB ))
+        fi
+        local desc="${DESCRIPTION:--}"
+        printf "%-15s %-20s %-12s %-10s %-10s %s\n" \
+            "$name" "${SUBDOMAIN:-$name}.iiab.io" "$ip" "$status" "$ram_display" "$desc"
+    done
+
+    echo ""
+    echo "Resources: ${RAM_ALLOCATED}MB/${RAM_TOTAL}MB RAM allocated, ${DISK_ALLOCATED}MB disk"
+}
+
+###############################################################################
+# democtl status
+###############################################################################
+cmd_status() {
+    ensure_root "$@"
+    local name="${1:?Error: demo name required}"
+    local demo_dir="$ACTIVE_DIR/$name"
+
+    if [ ! -d "$demo_dir" ]; then
+        echo "Error: demo '$name' not found" >&2
+        return 1
+    fi
+
+    # shellcheck source=/dev/null
+    source "$demo_dir/config"
+    local ip
+    ip=$(cat "$demo_dir/ip")
+    local status
+    status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+
+    echo "=== Demo: $name ==="
+    echo "Subdomain:  ${SUBDOMAIN:-$name}.iiab.io"
+    echo "Edition:    $EDITION"
+    echo "Branch:     $IIAB_BRANCH"
+    echo "Repo:       $IIAB_REPO"
+    echo "IP:         $ip"
+    echo "Status:     $status"
+    echo "Volatile:   $VOLATILE"
+    echo "RAM Image:  $RAM_IMAGE"
+    echo "Size:       ${IMAGE_SIZE_MB}MB"
+    if [ -n "$DESCRIPTION" ]; then
+        echo "Description: $DESCRIPTION"
+    fi
+
+    if [ "$status" = "running" ]; then
+        echo ""
+        machinectl status "$name" 2>/dev/null || echo "Container not running"
+    fi
+
+    if [ "$status" = "building" ] && [ -f "$demo_dir/build.pid" ]; then
+        local pid
+        pid=$(cat "$demo_dir/build.pid")
+        echo ""
+        echo "Build PID: $pid"
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Build is still running..."
+        else
+            echo "Build process has exited (check log)"
+        fi
+    fi
+}
+
+###############################################################################
+# democtl logs
+###############################################################################
+cmd_logs() {
+    ensure_root "$@"
+    local name="${1:?Error: demo name required}"
+    local demo_dir="$ACTIVE_DIR/$name"
+
+    if [ ! -d "$demo_dir" ]; then
+        echo "Error: demo '$name' not found" >&2
+        return 1
+    fi
+
+    local status
+    status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+
+    if [ "$status" = "running" ]; then
+        machinectl status "$name" 2>/dev/null || echo "Container not running"
+    elif [ -f "$demo_dir/build.log" ]; then
+        echo "=== Build log for '$name' ==="
+        tail -100 "$demo_dir/build.log"
+    else
+        echo "No logs available for '$name'"
+    fi
+}
+
+###############################################################################
+# democtl shell
+###############################################################################
+cmd_shell() {
+    ensure_root "$@"
+    local name="${1:?Error: demo name required}"
+
+    if [ ! -d "$ACTIVE_DIR/$name" ]; then
+        echo "Error: demo '$name' not found" >&2
+        return 1
+    fi
+
+    machinectl shell "$name"
+}
+
+###############################################################################
+# democtl apply — read demos.sh and ensure state
+###############################################################################
+cmd_apply() {
+    ensure_root "$@"
+    local config_file="${1:-demos.sh}"
+
+    if [ ! -f "$config_file" ]; then
+        echo "Error: config file not found: $config_file" >&2
+        return 1
+    fi
+
+    ensure_state_dirs
+
+    echo "=== Applying demo configuration from $config_file ==="
+
+    # Parse the config file: collect all "demo add <name>" entries
+    local -a demo_names=()
+    local -a demo_args=()
+
+    # We run the file with a stub "demo" function that captures args
+    local parse_output
+    parse_output=$(bash -c '
+        demo() { shift; echo "$*"; }
+        source "'"$(realpath "$config_file")"'"
+    ' 2>/dev/null || true)
+
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        # The first word is the name, rest are flags
+        local demo_name
+        demo_name=$(echo "$line" | awk '{print $1}')
+        demo_names+=("$demo_name")
+        demo_args+=("$line")
+    done <<< "$parse_output"
+
+    if [ ${#demo_names[@]} -eq 0 ]; then
+        echo "No demos found in $config_file"
+        return 0
+    fi
+
+    echo "Found ${#demo_names[@]} demo(s): ${demo_names[*]}"
+    echo ""
+
+    # Add missing demos
+    for i in "${!demo_names[@]}"; do
+        local name="${demo_names[$i]}"
+        local args="${demo_args[$i]}"
+
+        if [ -d "$ACTIVE_DIR/$name" ]; then
+            echo "Demo '$name' already exists, skipping"
+        else
+            echo "Adding demo '$name'..."
+            # Parse the args string and call cmd_add
+            # shellcheck disable=SC2086
+            cmd_add $args
+        fi
+    done
+
+    # Remove demos not in config
+    for demo_dir in "$ACTIVE_DIR"/*/; do
+        [ -d "$demo_dir" ] || continue
+        local existing_name
+        existing_name=$(basename "$demo_dir")
+        local found=false
+        for wanted in "${demo_names[@]}"; do
+            if [ "$existing_name" = "$wanted" ]; then
+                found=true
+                break
+            fi
+        done
+        if ! $found; then
+            echo "Removing demo '$existing_name' (not in config)..."
+            cmd_remove "$existing_name"
+        fi
+    done
+
+    # Regenerate nginx
+    echo ""
+    echo "Regenerating nginx configuration..."
+    if [ -x "$SCRIPTS_DIR/nginx-gen.sh" ]; then
+        bash "$SCRIPTS_DIR/nginx-gen.sh"
+    fi
+
+    echo ""
+    echo "=== Applied ==="
+    cmd_list
+}
+
+###############################################################################
+# democtl reload — regenerate nginx
+###############################################################################
+cmd_reload() {
+    ensure_root "$@"
+    if [ -x "$SCRIPTS_DIR/nginx-gen.sh" ]; then
+        bash "$SCRIPTS_DIR/nginx-gen.sh"
+    else
+        echo "Error: nginx-gen.sh not found at $SCRIPTS_DIR/nginx-gen.sh" >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# democtl certbot
+###############################################################################
+cmd_certbot() {
+    ensure_root "$@"
+    if [ -f "$PLAYBOOKS_DIR/06-certbot.yml" ]; then
+        ansible-playbook "$PLAYBOOKS_DIR/06-certbot.yml"
+    else
+        # Simple certbot wrapper if playbook not available
+        local domains=()
+        for demo_dir in "$ACTIVE_DIR"/*/; do
+            [ -d "$demo_dir" ] || continue
+            local name
+            name=$(basename "$demo_dir")
+            local subdomain="$name"
+            if [ -f "$demo_dir/config" ]; then
+                # shellcheck source=/dev/null
+                source "$demo_dir/config"
+                subdomain="${SUBDOMAIN:-$name}"
+            fi
+            domains+=("$subdomain.iiab.io")
+        done
+
+        if [ ${#domains[@]} -eq 0 ]; then
+            echo "No active demos to get certificates for"
+            return 0
+        fi
+
+        local domain_args=()
+        for d in "${domains[@]}"; do
+            domain_args+=("-d" "$d")
+        done
+
+        mkdir -p /var/www/certbot
+        certbot certonly \
+            --webroot --webroot-path /var/www/certbot \
+            --agree-tos --no-eff-email --non-interactive \
+            "${domain_args[@]}"
+
+        # Reload nginx
+        nginx -t && systemctl reload nginx
+    fi
+}
+
+###############################################################################
+# democtl ramfs
+###############################################################################
+cmd_ramfs() {
+    ensure_root "$@"
+    local action="${1:?Usage: democtl ramfs <load|unload|status|cleanup> [name]}"
+    shift
+
+    if [ -x "$SCRIPTS_DIR/ramfs-setup.sh" ]; then
+        bash "$SCRIPTS_DIR/ramfs-setup.sh" "$action" "$@"
+    else
+        echo "Error: ramfs-setup.sh not found" >&2
+        return 1
+    fi
+}
+
+###############################################################################
+# democtl help
+###############################################################################
+cmd_help() {
+    cat << 'EOF'
+democtl - Manage IIAB whitelabel demo containers
+
+Usage: democtl <command> [args]
+
+Commands:
+  init                          Bootstrap host (install packages, network, nginx)
+  apply [demos.sh]              Apply demo config from file
+  add <name> [flags]            Add a demo (builds in background by default)
+  remove <name>                 Stop and delete a demo
+  rebuild <name>                Remove and re-add a demo
+  list                          Show all demos
+  status <name>                 Detailed status for a demo
+  logs <name>                   Show build log or container journal
+  shell <name>                  Open shell in container
+  reload                        Regenerate nginx config from active demos
+  certbot                       Obtain/renew Let's Encrypt certificates
+  ramfs <action> [name]         Manage RAM-loaded images (load/unload/status/cleanup)
+
+Add flags:
+  --edition <edition>       IIAB edition: small, medium, large (default: name)
+  --repo <url>              IIAB git repo (default: github.com/iiab/iiab.git)
+  --branch <ref>            Git branch/tag/ref (default: master)
+  --size <MB>               Image size (default: 15000)
+  --volatile <mode>         no | yes | state (default: state)
+  --ram-image               Load image into host RAM (default: true)
+  --no-ram-image            Keep image on disk
+  --local-vars <path>       Path to local_vars.yml
+  --fallback                Use as fallback for unknown subdomains
+  --description <text>      Human-readable description
+  --fg                      Build in foreground (default: background)
+
+Examples:
+  democtl init
+  democtl apply demos.sh
+  democtl add small --edition small --size 12000
+  democtl add pr3612 --edition large --branch refs/pull/3612/head --volatile yes
+  democtl list
+  democtl status small
+  democtl remove pr3612
+EOF
+}
+
+###############################################################################
+# Main dispatch
+###############################################################################
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        init)      cmd_init "$@" ;;
+        apply)     cmd_apply "$@" ;;
+        add)       cmd_add "$@" ;;
+        remove)    cmd_remove "$@" ;;
+        rebuild)   cmd_rebuild "$@" ;;
+        list)      cmd_list "$@" ;;
+        status)    cmd_status "$@" ;;
+        logs)      cmd_logs "$@" ;;
+        shell)     cmd_shell "$@" ;;
+        reload)    cmd_reload "$@" ;;
+        certbot)   cmd_certbot "$@" ;;
+        ramfs)     cmd_ramfs "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            echo "Error: Unknown command: $cmd" >&2
+            echo "Run 'democtl help' for usage" >&2
+            return 1
+            ;;
+    esac
+}
+
+main "$@"
