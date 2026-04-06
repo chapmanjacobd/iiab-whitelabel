@@ -1,0 +1,41 @@
+---
+# 04-build-large.yml - Build the large IIAB container image
+- name: Build IIAB Large Container
+  hosts: host
+  become: true
+  vars_files:
+    - ../vars/containers.yml
+
+  tasks:
+    - name: Check if large image already exists
+      ansible.builtin.stat:
+        path: /var/lib/machines/iiab-large.raw
+      register: large_image_stat
+
+    - name: Display status
+      ansible.builtin.debug:
+        msg: >
+          Large container image {{ 'exists' if large_image_stat.stat.exists else 'needs to be built' }}.
+          {{ 'Skipping build.' if large_image_stat.stat.exists else 'Proceeding with build.' }}
+
+    - name: Build large container image
+      ansible.builtin.command:
+        cmd: "{{ playbook_dir }}/../scripts/build-container.sh large"
+      when: not large_image_stat.stat.exists
+      changed_when: true
+      register: build_result
+
+    - name: Display build output
+      ansible.builtin.debug:
+        var: build_result.stdout
+      when: not large_image_stat.stat.exists
+
+    - name: Create container service files
+      ansible.builtin.command:
+        cmd: "{{ playbook_dir }}/../scripts/container-service.sh large 10.0.3.30"
+      changed_when: true
+      register: service_result
+
+    - name: Display service setup info
+      ansible.builtin.debug:
+        var: service_result.stdout

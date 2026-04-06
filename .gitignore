@@ -1,0 +1,6 @@
+# IIAB Whitelabel Demo Server
+hosts/
+vars/
+*.img
+*.state
+.machines/

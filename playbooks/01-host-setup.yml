@@ -1,0 +1,157 @@
+---
+# 01-host-setup.yml
+# Configure the demo server host: nginx, systemd-nspawn, networking
+- name: Setup IIAB Demo Server Host
+  hosts: host
+  become: true
+  vars_files:
+    - ../vars/containers.yml
+
+  tasks:
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - nginx
+          - systemd-container
+          - debootstrap
+          - parted
+          - jq
+          - e2fsprogs
+          - dosfstools
+          - psmisc
+          - iptables
+          - bridge-utils
+          - expect
+          - curl
+          - git
+          - certbot
+          - python3-certbot-nginx
+        update_cache: true
+        state: present
+
+    - name: Enable and start systemd-networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        enabled: true
+        state: started
+
+    - name: Enable and start systemd-resolved
+      ansible.builtin.systemd:
+        name: systemd-resolved
+        enabled: true
+        state: started
+
+    - name: Enable IPv4 forwarding
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        state: present
+        sysctl_set: true
+        reload: true
+
+    - name: Create container bridge network
+      ansible.builtin.copy:
+        content: |
+          [NetDev]
+          Name=iiab-br0
+          Kind=bridge
+
+          [Bridge]
+          DefaultPVID=
+          VLANFiltering=false
+
+          [Network]
+          Address={{ container_network.gateway }}/24
+          IPForward=yes
+          IPMasquerade=yes
+        dest: /etc/systemd/network/iiab-br0.netdev
+        mode: "0644"
+      notify: Restart systemd-networkd
+
+    - name: Create bridge network configuration
+      ansible.builtin.copy:
+        content: |
+          [Match]
+          Name=iiab-br0
+
+          [Network]
+          Address={{ container_network.gateway }}/24
+          IPForward=yes
+          IPMasquerade=yes
+        dest: /etc/systemd/network/iiab-br0.network
+        mode: "0644"
+      notify: Restart systemd-networkd
+
+    - name: Deploy nginx configuration
+      ansible.builtin.copy:
+        src: ../nginx/iiab-demo.conf
+        dest: /etc/nginx/sites-available/iiab-demo.conf
+        mode: "0644"
+      notify: Reload nginx
+
+    - name: Enable nginx site
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/iiab-demo.conf
+        dest: /etc/nginx/sites-enabled/iiab-demo.conf
+        state: link
+      notify: Reload nginx
+
+    - name: Remove default nginx site
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload nginx
+
+    - name: Enable and start nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+
+    - name: Configure iptables for container NAT
+      ansible.builtin.iptables:
+        table: nat
+        chain: POSTROUTING
+        out_interface: "{{ ansible_default_ipv4.alias | default('eth0') }}"
+        jump: MASQUERADE
+        comment: "NAT for IIAB containers"
+
+    - name: Allow forwarding to container network
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: iiab-br0
+        out_interface: "{{ ansible_default_ipv4.alias | default('eth0') }}"
+        jump: ACCEPT
+        comment: "Forward from containers to internet"
+
+    - name: Allow return traffic from internet
+      ansible.builtin.iptables:
+        chain: FORWARD
+        in_interface: "{{ ansible_default_ipv4.alias | default('eth0') }}"
+        out_interface: iiab-br0
+        jump: ACCEPT
+        state: present
+        rule_num: 1
+        comment: "Forward from internet to containers"
+
+    - name: Create /var/lib/machines directory
+      ansible.builtin.file:
+        path: /var/lib/machines
+        state: directory
+        mode: "0755"
+
+    - name: Test nginx configuration
+      ansible.builtin.command:
+        cmd: nginx -t
+      changed_when: false
+
+  handlers:
+    - name: Restart systemd-networkd
+      ansible.builtin.systemd:
+        name: systemd-networkd
+        state: restarted
+
+    - name: Reload nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded

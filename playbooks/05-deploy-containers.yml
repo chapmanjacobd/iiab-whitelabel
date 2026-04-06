@@ -1,0 +1,111 @@
+---
+# 05-deploy-containers.yml - Deploy and start all IIAB containers
+- name: Deploy IIAB Containers
+  hosts: host
+  become: true
+  vars_files:
+    - ../vars/containers.yml
+
+  tasks:
+    - name: Verify container images exist
+      ansible.builtin.stat:
+        path: "/var/lib/machines/iiab-{{ item.edition }}.raw"
+      register: image_stats
+      loop: "{{ containers.values() | list }}"
+      loop_control:
+        label: "{{ item.edition }}"
+
+    - name: Check for missing images
+      ansible.builtin.fail:
+        msg: >
+          Missing image: /var/lib/machines/iiab-{{ item.item.edition }}.raw
+          Run the corresponding build playbook first: playbooks/0{{ loop.index }}-build-{{ item.item.edition }}.yml
+      when: not item.stat.exists
+      loop: "{{ image_stats.results }}"
+
+    - name: Import all container images
+      ansible.builtin.command:
+        cmd: "machinectl import-raw /var/lib/machines/iiab-{{ item.edition }}.raw iiab-{{ item.edition }}"
+      loop: "{{ containers.values() | list }}"
+      loop_control:
+        label: "{{ item.edition }}"
+      register: import_results
+      changed_when: "'exists' not in import_results.stderr | default('')"
+      failed_when: false
+
+    - name: Display import results
+      ansible.builtin.debug:
+        var: import_results
+        verbosity: 1
+
+    - name: Start all containers
+      ansible.builtin.command:
+        cmd: "machinectl start iiab-{{ item.edition }}"
+      loop: "{{ containers.values() | list }}"
+      loop_control:
+        label: "{{ item.edition }}"
+      register: start_results
+      changed_when: true
+      failed_when: false
+
+    - name: Wait for containers to boot
+      ansible.builtin.wait_for:
+        timeout: 30
+      delegate_to: localhost
+
+    - name: Check container status
+      ansible.builtin.command:
+        cmd: "machinectl status iiab-{{ item.edition }}"
+      loop: "{{ containers.values() | list }}"
+      loop_control:
+        label: "{{ item.edition }}"
+      register: status_results
+      changed_when: false
+      failed_when: false
+
+    - name: Display container status
+      ansible.builtin.debug:
+        msg: |
+          {{ "=== " + item.item.edition | upper + " ===" }}
+          {{ item.stdout | default(item.stderr | default('No output')) }}
+      loop: "{{ status_results.results }}"
+      loop_control:
+        label: "{{ item.item.edition }}"
+
+    - name: Verify nginx is running
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Test HTTP routing
+      ansible.builtin.uri:
+        url: "http://127.0.0.1/"
+        headers:
+          Host: "{{ item.edition }}.iiab.io"
+        status_code: [200, 301, 302]
+        follow_redirects: none
+      loop: "{{ containers.values() | list }}"
+      loop_control:
+        label: "{{ item.edition }}"
+      register: http_tests
+      failed_when: false
+      changed_when: false
+
+    - name: Display routing test results
+      ansible.builtin.debug:
+        msg: |
+          {{ item.item.edition }}.iiab.io -> HTTP {{ item.status | default('failed') }}
+      loop: "{{ http_tests.results }}"
+      loop_control:
+        label: "{{ item.item.edition }}"
+
+    - name: List all machines
+      ansible.builtin.command:
+        cmd: machinectl list
+      changed_when: false
+      register: machinectl_list
+
+    - name: Display running machines
+      ansible.builtin.debug:
+        var: machinectl_list.stdout
