@@ -204,7 +204,7 @@ if [[ "$IIAB_BRANCH" == refs/pull/* ]]; then
         git fetch --depth 1 "$IIAB_REPO" "$IIAB_BRANCH" && \
         git checkout FETCH_HEAD)
 else
-    git clone --depth 1 --branch "$IIAB_BRANCH" "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab" 2>/dev/null || \
+    git clone --depth 1 --branch "$IIAB_BRANCH" "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab" || \
         git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
 fi
 
@@ -272,9 +272,6 @@ systemctl is-active --quiet systemd-networkd || systemctl start systemd-networkd
 systemctl is-active --quiet systemd-resolved || systemctl start systemd-resolved
 sysctl -w net.ipv4.ip_forward=1
 
-EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-setup_iptables_nat "$EXT_IF"
-
 systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force
 rm -f "$MOUNT_DIR/etc/resolv.conf"
 echo "nameserver 8.8.8.8" > "$MOUNT_DIR/etc/resolv.conf"
@@ -295,7 +292,7 @@ export MOUNT_DIR
 expect << 'EXPECT_EOF'
 set timeout 7200
 
-spawn systemd-nspawn -q --network-veth --resolv-conf=off -D $env(MOUNT_DIR) -M box --boot
+spawn systemd-nspawn --resolv-conf=off -D $env(MOUNT_DIR) -M box --boot
 
 expect "login: " { send "root\r" }
 
