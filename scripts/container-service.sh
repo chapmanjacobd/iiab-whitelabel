@@ -93,7 +93,6 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
-ProtectControlGroups=yes
 
 # Device access - restrict to only what nspawn needs
 DevicePolicy=closed
