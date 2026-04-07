@@ -409,7 +409,18 @@ PARTDEV="${LOOPDEV}p1"
 sync
 
 echo "Resizing partition to ${ROOTFS_PARTNEWEND}..."
-(yes "Yes" | parted ---pretend-input-tty "$LOOPDEV" unit b resizepart 1 "$ROOTFS_PARTNEWEND" || true) >/dev/null 2>&1
+# Use expect to reliably answer the GPT prompt (Fix then Yes)
+export PARTED_DEVICE="$LOOPDEV"
+export PARTED_NEW_END="$ROOTFS_PARTNEWEND"
+expect <<'EXPECT_EOF' >/dev/null 2>&1 || true
+set timeout 90
+spawn parted ---pretend-input-tty $env(PARTED_DEVICE) unit b resizepart 1 $env(PARTED_NEW_END)
+expect {
+    -re "(?i)fix" { send "Fix\r"; exp_continue }
+    -re "(?i)continue" { send "Yes\r"; exp_continue }
+    eof
+}
+EXPECT_EOF
 sync
 partprobe "$LOOPDEV" 2>/dev/null || true
 udevadm settle 2>/dev/null || sleep 2
