@@ -253,12 +253,7 @@ echo "$NAME" > "$MOUNT_DIR/etc/hostname"
 
 # Container and hardware-specific overrides
 cat >> "$MOUNT_DIR/etc/iiab/local_vars.yml" << 'EOF'
-is_proot: True
-# Disabled for container deployment
-hostapd_install: False
-hostapd_enabled: False
-captiveportal_install: False
-captiveportal_enabled: False
+is_VM: True
 EOF
 
 ###############################################################################
