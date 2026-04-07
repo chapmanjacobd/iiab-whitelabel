@@ -53,7 +53,7 @@ cat > "${SETTINGS_DIR}/${NAME}.nspawn" << EOF
 [Exec]
 Hostname=${NAME}
 Boot=true
-PrivateUsers=pick
+PrivateUsers=yes
 NoNewPrivileges=yes
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources @reboot @swap @mount @debug @clock @module @raw-io
