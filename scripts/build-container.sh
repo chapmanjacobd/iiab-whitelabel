@@ -299,14 +299,13 @@ set timeout 7200
 spawn systemd-nspawn -q --network-veth --resolv-conf=off -D $env(MOUNT_DIR) -M box --boot
 
 expect "login: " { send "root\r" }
+expect -re {#\s?$} { send "export PAGER=cat SYSTEMD_PAGER=cat\r" }
 
-# Debian cloud image prep: generate SSH host keys, fix cloudimg sshd configs, start sshd
-expect -re {#\s?$} { send "echo '=== PRE-Nspawn SETUP ==='; ssh-keygen -A 2>&1; echo 'Host keys:'; ls -la /etc/ssh/ssh_host_* 2>&1\r" }
+# Debian cloud image prep: generate SSH host keys, start sshd
+expect -re {#\s?$} { send "ssh-keygen -A\r" }
 
-expect -re {#\s?$} { send "# Fix cloud image drop-in configs that conflict with IIAB; for f in /etc/ssh/sshd_config.d/*.conf; do sed -i 's/^PermitRootLogin/# &/' \"\$f\" 2>/dev/null; sed -i 's/^PasswordAuthentication/# &/' \"\$f\" 2>/dev/null; done; echo 'done'\r" }
-
-# Start ssh service before build so we know it works
-expect -re {#\s?$} { send "systemctl enable ssh 2>&1; systemctl start ssh 2>&1; echo 'SSHD_START_EXIT:'\$?\r" }
+# Start ssh service before build; debug if it fails
+expect -re {#\s?$} { send "systemctl enable ssh; if ! systemctl start ssh 2>&1; then systemctl status ssh; journalctl -xeu ssh; fi\r" }
 
 expect -re {#\s?$} { send "/root/run_build.sh; echo \"BUILD_EXIT_CODE:\$?\"\r" }
 
