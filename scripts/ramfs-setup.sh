@@ -76,7 +76,9 @@ load_image() {
     # If already mounted but too small, remount to grow
     local current_size
     current_size=$(df -m "$RAMFS_ROOT" | awk 'NR==2 {print $2}')
-    local needed=$(( img_size_mb + 100 )) # Small buffer
+    local current_used
+    current_used=$(df -m "$RAMFS_ROOT" | awk 'NR==2 {print $3}')
+    local needed=$(( current_used + img_size_mb + 100 )) # Small buffer
     if [ "$needed" -gt "$current_size" ]; then
         mount -o "remount,size=${needed}M" "$RAMFS_ROOT"
     fi

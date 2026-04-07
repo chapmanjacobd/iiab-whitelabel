@@ -743,12 +743,9 @@ cmd_apply() {
     local -a demo_names=()
     local -a demo_args=()
 
-    # We run the file with a stub "demo" function that captures args
+    # Safely parse the config file by unfolding multi-line statements
     local parse_output
-    parse_output=$(bash -c '
-        demo() { shift; echo "$*"; }
-        source "'"$(realpath "$config_file")"'"
-    ' 2>/dev/null || true)
+    parse_output=$(sed -e ':a' -e '/\\$/N; s/\\\n[[:space:]]*/ /; ta' "$config_file" | awk '/^[[:space:]]*demo add / { $1=""; $2=""; sub(/^[[:space:]]+/, ""); print }')
 
     while IFS= read -r line; do
         [ -z "$line" ] && continue

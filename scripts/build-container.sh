@@ -124,24 +124,18 @@ echo "=== Step 2: Preparing container rootfs ==="
 # Install IIAB code
 mkdir -p "$MOUNT_DIR/opt/iiab"
 
-# Determine IIAB source: prefer sibling checkout, then clone
-IIAB_SOURCE="${PROJECT_DIR}/../iiab"
-if [ -d "$IIAB_SOURCE" ]; then
-    echo "Copying IIAB from local checkout: $IIAB_SOURCE"
-    cp -R --preserve=mode,timestamps,links "$IIAB_SOURCE" "$MOUNT_DIR/opt/iiab/"
+# Determine IIAB source: clone from repository
+echo "Cloning IIAB from $IIAB_REPO (branch: $IIAB_BRANCH)..."
+# Handle refspec for PRs
+if [[ "$IIAB_BRANCH" == refs/pull/* ]]; then
+    git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
+    # Fetch the specific PR ref
+    (cd "$MOUNT_DIR/opt/iiab/iiab" && \
+        git fetch --depth 1 "$IIAB_REPO" "$IIAB_BRANCH" && \
+        git checkout FETCH_HEAD)
 else
-    echo "Cloning IIAB from $IIAB_REPO (branch: $IIAB_BRANCH)..."
-    # Handle refspec for PRs
-    if [[ "$IIAB_BRANCH" == refs/pull/* ]]; then
+    git clone --depth 1 --branch "$IIAB_BRANCH" "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab" 2>/dev/null || \
         git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
-        # Fetch the specific PR ref
-        (cd "$MOUNT_DIR/opt/iiab/iiab" && \
-            git fetch --depth 1 "$IIAB_REPO" "$IIAB_BRANCH" && \
-            git checkout FETCH_HEAD)
-    else
-        git clone --depth 1 --branch "$IIAB_BRANCH" "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab" 2>/dev/null || \
-            git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
-    fi
 fi
 
 # Install IIAB configuration
@@ -214,6 +208,18 @@ iptables -C FORWARD -i ve-+ -o "$EXT_IF" -j ACCEPT 2>/dev/null || {
 systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force
 echo "nameserver 8.8.8.8" > "$MOUNT_DIR/etc/resolv.conf"
 
+# Create a robust build script to run inside the container
+cat > "$MOUNT_DIR/root/run_build.sh" << 'EOF_SCRIPT'
+#!/bin/bash
+set -euo pipefail
+apt update
+DEBIAN_FRONTEND=noninteractive apt upgrade -y
+curl -fLo /usr/sbin/iiab https://raw.githubusercontent.com/iiab/iiab-factory/master/iiab
+chmod 0755 /usr/sbin/iiab
+/usr/sbin/iiab --risky
+EOF_SCRIPT
+chmod +x "$MOUNT_DIR/root/run_build.sh"
+
 export MOUNT_DIR
 expect << 'EXPECT_EOF'
 set timeout 7200
@@ -222,15 +228,11 @@ spawn systemd-nspawn -q --network-veth --resolv-conf=off -D $env(MOUNT_DIR) -M b
 
 expect "login: " { send "root\r" }
 
-expect -re {#\s?$} { send "apt update\r" }
-expect -re {#\s?$} { send "DEBIAN_FRONTEND=noninteractive apt upgrade -y\r" }
-
-expect -re {#\s?$} { send "curl -fLo /usr/sbin/iiab https://raw.githubusercontent.com/iiab/iiab-factory/master/iiab\r" }
-expect -re {#\s?$} { send "chmod 0755 /usr/sbin/iiab\r" }
-expect -re {#\s?$} { send "/usr/sbin/iiab --risky\r" }
+expect -re {#\s?$} { send "/root/run_build.sh || echo 'IIAB_BUILD_FAILED'\r" }
 
 expect {
     timeout { puts "\nTimed out waiting for IIAB install"; exit 1 }
+    "IIAB_BUILD_FAILED" { puts "\nIIAB build script failed"; exit 1 }
     "photographed" { send "\r" }
 }
 
