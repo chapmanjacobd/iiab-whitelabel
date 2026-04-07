@@ -33,60 +33,6 @@ release_ramfs_lock() {
 
 trap release_ramfs_lock EXIT
 
-# Load the shared Debian base image into RAM for RAM-image demo builds
-load_base_image() {
-    local base_img="$1"  # Path to the base .raw or .img file
-    local dest="${RAMFS_ROOT}/base-image.raw"
-
-    if [ ! -f "$base_img" ]; then
-        echo "Error: Base image not found: $base_img" >&2
-        exit 1
-    fi
-
-    acquire_ramfs_lock
-
-    # Create RAMFS root if needed
-    if ! mountpoint -q "$RAMFS_ROOT" 2>/dev/null; then
-        mkdir -p "$RAMFS_ROOT"
-        # Start with a reasonable base size; will be remounted if needed
-        local size_mb=2048
-        echo "Mounting tmpfs at $RAMFS_ROOT (${size_mb}MB)..."
-        mount -t tmpfs -o "size=${size_mb}M,mode=0755" tmpfs "$RAMFS_ROOT"
-    fi
-
-    if [ -f "$dest" ]; then
-        echo "Base image already loaded in RAM: $dest"
-        return 0
-    fi
-
-    local img_size_mb
-    img_size_mb=$(du -m "$base_img" | cut -f1)
-    echo "Loading base image into RAM (${img_size_mb}MB)..."
-
-    # Check available RAM
-    local avail_mb
-    avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
-    if [ "$img_size_mb" -gt "$((avail_mb - 512))" ]; then
-        echo "Error: Not enough RAM available for base image (${avail_mb}MB, need ~${img_size_mb}MB)" >&2
-        exit 1
-    fi
-
-    # Ensure tmpfs is large enough
-    local current_size
-    current_size=$(df -m "$RAMFS_ROOT" | awk 'NR==2 {print $2}')
-    local current_used
-    current_used=$(df -m "$RAMFS_ROOT" | awk 'NR==2 {print $3}')
-    local needed=$(( current_used + img_size_mb + 512 ))  # Extra buffer
-    if [ "$needed" -gt "$current_size" ]; then
-        echo "Growing tmpfs from ${current_size}MB to ${needed}MB..."
-        mount -o "remount,size=${needed}M" "$RAMFS_ROOT"
-    fi
-
-    cp --reflink=auto "$base_img" "$dest"
-    chmod 0644 "$dest"
-    echo "Base image loaded into RAM: $dest"
-}
-
 load_image() {
     local name="$1"
     local src="/var/lib/machines/${name}.raw"
@@ -247,13 +193,6 @@ case "$ACTION" in
         else
             unload_image "$NAME"
         fi
-        ;;
-    base-image)
-        if [ -z "$NAME" ]; then
-            echo "Error: base image path required" >&2
-            exit 1
-        fi
-        load_base_image "$NAME"
         ;;
     status)
         status

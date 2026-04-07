@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # build-container.sh - Build an IIAB container image with arbitrary config
-# No external dependencies — all mount/loop/shrink logic is inlined.
+#
+# All builds happen in RAM by default (tmpfs), producing zero disk I/O.
+# After shrinking, the image is either kept in RAM (--ram-image) or
+# copied to persistent disk. Use --build-on-disk to override.
+#
 # Usage:
 #   build-container.sh --name <name> --edition <edition> \
 #     --repo <repo> --branch <branch> --size <MB> \
-#     --volatile <mode> --ip <ip> [--ram-image] [--local-vars <path>]
+#     --volatile <mode> --ip <ip> [--ram-image] [--build-on-disk] \
+#     [--local-vars <path>] [--image-source <path>]
 set -euo pipefail
 
 # Defaults
@@ -18,6 +23,7 @@ IP=""
 RAM_IMAGE=false
 LOCAL_VARS=""
 IMAGE_SOURCE=""
+BUILD_ON_DISK=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -32,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --ram-image)  RAM_IMAGE=true; shift ;;
         --local-vars) LOCAL_VARS="$2"; shift 2 ;;
         --image-source) IMAGE_SOURCE="$2"; shift 2 ;;
+        --build-on-disk) BUILD_ON_DISK=true; shift ;;
         *)
             echo "Warning: Unknown option: $1" >&2
             shift
@@ -55,22 +62,40 @@ fi
 echo "=========================================="
 echo "Building IIAB container: $NAME"
 echo "=========================================="
-echo "Edition:   $EDITION"
-echo "Branch:    $IIAB_BRANCH"
-echo "Repo:      $IIAB_REPO"
-echo "Size:      ${SIZE_MB}MB"
-echo "Volatile:  $VOLATILE"
-echo "IP:        $IP"
-echo "RAM image: $RAM_IMAGE"
-echo "Local vars: ${LOCAL_VARS:-(none)}"
+echo "Edition:      $EDITION"
+echo "Branch:       $IIAB_BRANCH"
+echo "Repo:         $IIAB_REPO"
+echo "Size:         ${SIZE_MB}MB"
+echo "Volatile:     $VOLATILE"
+echo "IP:           $IP"
+echo "RAM image:    $RAM_IMAGE"
+echo "Build on disk: $BUILD_ON_DISK"
+echo "Local vars:   ${LOCAL_VARS:-(none)}"
 
 ###############################################################################
-# Build working directory
+# Build working directory (tmpfs by default)
 ###############################################################################
-BUILD_DIR="/var/lib/iiab-demos/build/${NAME}"
+if $BUILD_ON_DISK; then
+    BUILD_DIR="/var/lib/iiab-demos/build/${NAME}"
+else
+    BUILD_DIR="/run/iiab-demos/build/${NAME}"
+fi
 MOUNT_DIR="${BUILD_DIR}/rootfs"
 WORK_IMG="${BUILD_DIR}/work.img"
+
+if ! $BUILD_ON_DISK && ! mountpoint -q "${BUILD_DIR%/*}" 2>/dev/null; then
+    mkdir -p "${BUILD_DIR%/*}"
+    ram_size=$(( SIZE_MB * 12 / 10 ))  # 20% headroom for overhead
+    echo "Mounting tmpfs at ${BUILD_DIR%/*} (${ram_size}MB)..."
+    mount -t tmpfs -o "size=${ram_size}M,mode=0755" tmpfs "${BUILD_DIR%/*}"
+fi
 mkdir -p "$BUILD_DIR" "$MOUNT_DIR"
+
+# Track whether we need to unmount tmpfs at end
+TMPFS_MOUNTED=false
+if ! $BUILD_ON_DISK && mountpoint -q "${BUILD_DIR%/*}" 2>/dev/null; then
+    TMPFS_MOUNTED=true
+fi
 
 # Cleanup on exit or failure
 LOOPDEV=""
@@ -82,6 +107,11 @@ cleanup() {
     if [ -n "$LOOPDEV" ] && losetup "$LOOPDEV" &>/dev/null; then
         echo "Warning: Loop device $LOOPDEV still attached — detaching" >&2
         losetup --detach "$LOOPDEV" 2>/dev/null || true
+    fi
+    # For non-RAM builds from RAM, clean up the tmpfs entirely
+    if $TMPFS_MOUNTED && ! $RAM_IMAGE && mountpoint -q "${BUILD_DIR%/*}" 2>/dev/null; then
+        echo "Cleaning up build tmpfs..."
+        umount "${BUILD_DIR%/*}" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -105,7 +135,7 @@ else
 fi
 
 ###############################################################################
-# Step 1: Prepare Debian base image (inline mount.sh logic)
+# Step 1: Prepare Debian base image
 ###############################################################################
 echo ""
 echo "=== Step 1: Preparing Debian base image ==="
@@ -295,7 +325,7 @@ echo ""
 echo "=== IIAB install complete ==="
 
 ###############################################################################
-# Step 4: Shrink the image (inline shrink.sh logic)
+# Step 4: Shrink the image
 ###############################################################################
 echo ""
 echo "=== Step 4: Shrinking image ==="
@@ -313,7 +343,7 @@ rm -f "$MOUNT_DIR/etc/iiab/uuid"
 rm -f "$MOUNT_DIR/var/swap"
 touch "$MOUNT_DIR/.resize-rootfs"
 
-# Clean rootfs via nspawn (same as shrink.sh)
+# Clean rootfs via nspawn
 systemd-nspawn -q -D "$MOUNT_DIR" --pipe /bin/bash -eux << 'CLEANEOF'
 apt clean
 rm -rf /var/cache/apt/archives/*.deb /var/lib/apt/lists/*
@@ -360,7 +390,7 @@ PART_INFO=$(parted -m --script "$LOOPDEV" unit B print | grep "^1:")
 ROOTFS_PARTSTART=$(echo "$PART_INFO" | awk -F ":" '{print $2}' | tr -d 'B')
 ROOTFS_PARTNEWEND=$((ROOTFS_PARTSTART + TOTAL_REQUIRED_SIZE - 1))
 
-echo "Resizing partition from $(parted -m --script "$LOOPDEV" unit B print | grep "^1:" | awk -F: '{print $3}' | tr -d B) to ${ROOTFS_PARTNEWEND}..."
+echo "Resizing partition to ${ROOTFS_PARTNEWEND}..."
 (yes Yes | parted ---pretend-input-tty "$LOOPDEV" unit b resizepart 1 "$ROOTFS_PARTNEWEND" || true) >/dev/null 2>&1
 sync
 partprobe "$LOOPDEV" 2>/dev/null || true
@@ -402,24 +432,22 @@ echo "Image shrunk successfully ($(du -sm "$WORK_IMG" | cut -f1)MB)"
 echo ""
 echo "=== Step 5: Registering container image ==="
 
-# For RAM demos, write directly to tmpfs
-if [ "$RAM_IMAGE" = "true" ]; then
-    DEST="/run/iiab-ramfs/${NAME}.raw"
+mkdir -p /var/lib/machines
+
+if $RAM_IMAGE; then
+    # Keep image in RAM — mount /run/iiab-ramfs if needed
     if ! mountpoint -q "/run/iiab-ramfs" 2>/dev/null; then
         mkdir -p "/run/iiab-ramfs"
         ram_size=$(( SIZE_MB * 11 / 10 ))
-        echo "Mounting tmpfs at /run/iiab-ramfs (${ram_size}MB) for RAM build..."
+        echo "Mounting tmpfs at /run/iiab-ramfs (${ram_size}MB)..."
         mount -t tmpfs -o "size=${ram_size}M,mode=0755" tmpfs "/run/iiab-ramfs"
     fi
-else
-    DEST="/var/lib/machines/${NAME}.raw"
-    mkdir -p /var/lib/machines
-fi
 
-mv "$WORK_IMG" "$DEST"
+    # Move from build location to RAM image store
+    DEST="/run/iiab-ramfs/${NAME}.raw"
+    mv "$WORK_IMG" "$DEST"
 
-# For RAM demos, create symlink so systemd-nspawn can find it
-if [ "$RAM_IMAGE" = "true" ]; then
+    # Symlink so systemd-nspawn can find it
     ln -sf "$DEST" "/var/lib/machines/${NAME}.raw"
     echo ""
     echo "=========================================="
@@ -427,6 +455,9 @@ if [ "$RAM_IMAGE" = "true" ]; then
     echo "Image: $DEST (symlinked to /var/lib/machines/${NAME}.raw)"
     echo "=========================================="
 else
+    # Copy final image to persistent disk
+    DEST="/var/lib/machines/${NAME}.raw"
+    cp --reflink=auto "$WORK_IMG" "$DEST"
     echo ""
     echo "=========================================="
     echo "Build complete!"
