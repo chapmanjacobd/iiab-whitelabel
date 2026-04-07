@@ -53,10 +53,10 @@ Installs packages, configures bridge networking, sets up nginx skeleton.
 ### 2. Deploy demos
 
 ```bash
-# Apply all demos from demos.sh
-make deploy
+# Add all three standard demos
+make small medium large
 
-# Or add individually
+# Or individually
 make small
 make large
 ```
@@ -78,7 +78,6 @@ make certbot
 
 ```
 democtl init                          Bootstrap host (packages, network, nginx)
-democtl apply [demos.sh]              Ensure all demos in config are running
 democtl add <name> [flags]            Add single demo (background build by default)
 democtl remove <name>                 Stop + delete demo + free resources
 democtl rebuild <name>                Remove + add (preserves config)
@@ -103,7 +102,7 @@ democtl reconcile                     Fix resource counter drift
 | `--ram-image` | true | Keep final image in host RAM |
 | `--no-ram-image` | — | Copy final image to disk |
 | `--build-on-disk` | — | Build on disk instead of RAM (override default) |
-| `--local-vars` | `vars/local_vars_<name>.yml` | Path to IIAB local_vars.yml |
+| `--local-vars` | `vars/local_vars_small.yml` | Path to custom IIAB local_vars.yml |
 | `--fallback` | false | Use as fallback for unknown subdomains |
 | `--description` | — | Human-readable description |
 | `--fg` | false | Build in foreground |
@@ -113,13 +112,6 @@ democtl reconcile                     Fix resource counter drift
 ```bash
 # Standard RAM demo
 democtl add small --local-vars vars/local_vars_small.yml --size 12000
-
-# Test a pull request
-democtl add pr3612 \
-  --local-vars vars/local_vars_large.yml \
-  --branch refs/pull/3612/head \
-  --volatile yes \
-  --description "Testing PR #3612"
 
 # Production: persistent on disk
 democtl add production \
@@ -131,13 +123,12 @@ democtl add production \
 democtl add small --local-vars vars/local_vars_small.yml --build-on-disk
 ```
 
-## Makefile shortcuts
+## Makefile
 
-The `small`, `medium`, and `large` targets add individual demos. `deploy` reads `demos.sh`:
+The Makefile provides convenience targets for the three standard demos:
 
 ```bash
 make small medium large    # Add all three demos
-make deploy                # Apply demos.sh (add missing, remove extras, reload nginx)
 make list                  # List all demos
 make status                # Show status of all demos
 make logs NAME=small       # View logs for a demo
@@ -146,12 +137,34 @@ make stop                  # Stop all demos
 make clean                 # Remove everything
 ```
 
+### Custom demos (README)
+
+To add a demo with a custom repo or branch (e.g. testing a pull request), call `democtl add` directly:
+
+```bash
+# Test a pull request
+democtl add pr3612 \
+  --repo https://github.com/iiab/iiab.git \
+  --branch refs/pull/3612/head \
+  --local-vars vars/local_vars_large.yml \
+  --volatile yes \
+  --description "Testing PR #3612"
+```
+
+Or from a custom fork:
+
+```bash
+democtl add myfork \
+  --repo https://github.com/myorg/iiab.git \
+  --branch feature-branch \
+  --local-vars vars/local_vars_small.yml
+```
+
 ## Directory Structure
 
 ```
 iiab-whitelabel/
 ├── democtl                    # Main CLI
-├── demos.sh                   # Default demo config (for `democtl apply`)
 ├── Makefile                   # CLI wrapper with convenience targets
 ├── README.md
 └── scripts/
@@ -219,20 +232,6 @@ Called automatically after each demo builds successfully, or via `democtl reload
 - `--branch` can be any git ref: branch, tag, `refs/pull/NNNN/head`, commit hash
 - Git only fetches from the explicitly configured `--repo` URL
 - Each build runs in an isolated nspawn container with its own network namespace
-
-## Makefile shortcuts
-
-```bash
-make init             # Bootstrap host
-make deploy           # Apply all demos (add missing, remove extras, reload nginx)
-make small medium large  # Add individual demos
-make list             # List all demos
-make status           # Show status of all demos
-make logs NAME=small  # View logs for a demo
-make ramfs-status     # Check RAM usage
-make stop             # Stop all demos
-make clean            # Remove everything
-```
 
 ## Troubleshooting
 

@@ -258,6 +258,6 @@ fi
 
 echo ""
 echo "=== Host setup complete! ==="
-echo "Now add demos with:"
-echo "  democtl add small"
-echo "  democtl apply demos.sh"
+echo "Add demos with:"
+echo "  make small medium large"
+echo "  democtl add <name> --local-vars <path>"

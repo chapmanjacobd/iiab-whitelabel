@@ -1,7 +1,7 @@
 # IIAB Whitelabel Demo Server
 # CLI wrapper with convenience targets
 
-.PHONY: help init deploy list status logs reload certbot stop clean reconcile test \
+.PHONY: help init list status logs reload certbot stop clean reconcile test \
         small medium large
 
 # Default target
@@ -11,10 +11,6 @@ help:
 # Host bootstrap
 init:
 	bash democtl init
-
-# Apply all demos from demos.sh (add missing, remove extras, regenerate nginx)
-deploy:
-	bash democtl apply demos.sh
 
 # Convenience targets — add a single demo
 small:

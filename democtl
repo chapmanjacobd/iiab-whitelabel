@@ -375,7 +375,7 @@ cmd_add() {
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            add) shift ;;  # skip 'add' from parsed demos.sh
+            add) shift ;;  # skip 'add' from parsed args
             --branch)     branch="$2"; shift 2 ;;
             --repo)       repo="$2"; shift 2 ;;
             --size)       size_mb="$2"; shift 2 ;;
@@ -989,92 +989,6 @@ cmd_shell() {
 }
 
 ###############################################################################
-# democtl apply — read demos.sh and ensure state
-###############################################################################
-cmd_apply() {
-    ensure_root "$@"
-    local config_file="${1:-demos.sh}"
-
-    if [ ! -f "$config_file" ]; then
-        echo "Error: config file not found: $config_file" >&2
-        return 1
-    fi
-
-    ensure_state_dirs
-
-    echo "=== Applying demo configuration from $config_file ==="
-
-    # Parse the config file: collect all "demo add <name>" entries
-    local -a demo_names=()
-    local -a demo_args=()
-
-    # Safely parse the config file by unfolding multi-line statements
-    local parse_output
-    parse_output=$(sed -e ':a' -e '/\\$/N; s/\\\n[[:space:]]*/ /; ta' "$config_file" | awk '/^[[:space:]]*demo add / { $1=""; $2=""; sub(/^[[:space:]]+/, ""); print }')
-
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        # The first word is the name, rest are flags
-        local demo_name
-        demo_name=$(echo "$line" | awk '{print $1}')
-        demo_names+=("$demo_name")
-        demo_args+=("$line")
-    done <<< "$parse_output"
-
-    if [ ${#demo_names[@]} -eq 0 ]; then
-        echo "No demos found in $config_file"
-        return 0
-    fi
-
-    echo "Found ${#demo_names[@]} demo(s): ${demo_names[*]}"
-    echo ""
-
-    # Add missing demos
-    for i in "${!demo_names[@]}"; do
-        local name="${demo_names[$i]}"
-        local args="${demo_args[$i]}"
-
-        if [ -d "$ACTIVE_DIR/$name" ]; then
-            echo "Demo '$name' already exists, skipping"
-        else
-            echo "Adding demo '$name'..."
-            # Parse the args string and call cmd_add
-            # shellcheck disable=SC2086
-            cmd_add $args
-        fi
-    done
-
-    # Remove demos not in config
-    for demo_dir in "$ACTIVE_DIR"/*/; do
-        [ -d "$demo_dir" ] || continue
-        local existing_name
-        existing_name=$(basename "$demo_dir")
-        local found=false
-        for wanted in "${demo_names[@]}"; do
-            if [ "$existing_name" = "$wanted" ]; then
-                found=true
-                break
-            fi
-        done
-        if ! $found; then
-            echo "Removing demo '$existing_name' (not in config)..."
-            cmd_remove "$existing_name"
-        fi
-    done
-
-    # Regenerate nginx
-    echo ""
-    echo "Regenerating nginx configuration..."
-    if [ -x "$SCRIPT_DIR/nginx-gen.sh" ]; then
-        bash "$SCRIPT_DIR/nginx-gen.sh"
-    fi
-
-    echo ""
-    echo "=== Applied ==="
-    cmd_list
-}
-
-###############################################################################
 # democtl reconcile — fix drift in allocated resource counters
 ###############################################################################
 cmd_reconcile() {
@@ -1213,7 +1127,6 @@ Usage: democtl <command> [args]
 
 Commands:
   init                          Bootstrap host (install packages, network, nginx)
-  apply [demos.sh]              Apply demo config from file
   add <name> [flags]            Add a demo (builds in background by default)
   remove <name>                 Stop and delete a demo
   rebuild <name>                Remove and re-add a demo
@@ -1241,7 +1154,6 @@ Add flags:
 
 Examples:
   democtl init
-  democtl apply demos.sh
   democtl add small --local-vars vars/local_vars_small.yml --size 12000
   democtl add pr3612 --local-vars vars/local_vars_large.yml --branch refs/pull/3612/head --volatile yes
   democtl list
@@ -1259,7 +1171,6 @@ main() {
 
     case "$cmd" in
         init)      cmd_init "$@" ;;
-        apply)     cmd_apply "$@" ;;
         add)       cmd_add "$@" ;;
         remove)    cmd_remove "$@" ;;
         rebuild)   cmd_rebuild "$@" ;;
