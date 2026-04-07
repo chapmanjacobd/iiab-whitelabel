@@ -245,8 +245,9 @@ if ! $VARS_COPIED; then
     exit 1
 fi
 
-# Disable RPi-specific settings
-sed -i '/rpi_image: True/d' "$MOUNT_DIR/etc/iiab/local_vars.yml"
+# Set image-building flag so services know they're building an image (not running live)
+# This prevents service restarts during build and lets them use 'stopped' instead
+echo "rpi_image: True" >> "$MOUNT_DIR/etc/iiab/local_vars.yml"
 sed -i 's/^iiab_admin_user_install: True/iiab_admin_user_install: False/' "$MOUNT_DIR/etc/iiab/local_vars.yml"
 
 # Set hostname
@@ -280,7 +281,6 @@ systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force
 rm -f "$MOUNT_DIR/etc/resolv.conf"
 echo "nameserver 8.8.8.8" > "$MOUNT_DIR/etc/resolv.conf"
 
-# Build script to run inside container
 cat > "$MOUNT_DIR/root/run_build.sh" << 'EOF_SCRIPT'
 #!/bin/bash
 set -euo pipefail
@@ -299,6 +299,9 @@ set timeout 7200
 spawn systemd-nspawn -q --network-veth --resolv-conf=off -D $env(MOUNT_DIR) -M box --boot
 
 expect "login: " { send "root\r" }
+
+# Diagnose sshd state before running the IIAB build
+expect -re {#\s?$} { send "echo '=== SSHD DIAGNOSTICS ==='; dpkg -l openssh-server 2>/dev/null | tail -1; systemctl status ssh 2>&1 || true; cat /etc/ssh/sshd_config.d/*.conf 2>/dev/null || echo 'no drop-in configs'; ls -la /etc/ssh/ssh_host_* 2>/dev/null || echo 'no host keys'; ssh-keygen -A 2>&1; echo '=== END DIAGNOSTICS ==='\r" }
 
 expect -re {#\s?$} { send "/root/run_build.sh; echo \"BUILD_EXIT_CODE:\$?\"\r" }
 
@@ -346,6 +349,8 @@ echo uninitialized > "$MOUNT_DIR/etc/machine-id"
 rm -f "$MOUNT_DIR/etc/iiab/uuid"
 rm -f "$MOUNT_DIR/var/swap"
 touch "$MOUNT_DIR/.resize-rootfs"
+
+sed -i '/rpi_image: True/d' "$MOUNT_DIR/etc/iiab/local_vars.yml"
 
 # Clean rootfs via nspawn
 systemd-nspawn -q -D "$MOUNT_DIR" --pipe /bin/bash -eux << 'CLEANEOF'
