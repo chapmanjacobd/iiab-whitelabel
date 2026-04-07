@@ -369,7 +369,7 @@ cmd_add() {
     local name="" branch="master"
     local repo="https://github.com/iiab/iiab.git"
     local size_mb=15000 volatile="state" ram_image=true
-    local local_vars="" fallback=false description=""
+    local local_vars="" wildcard=false description=""
     local foreground=false build_on_disk=false
 
     # Parse arguments
@@ -383,7 +383,7 @@ cmd_add() {
             --disk-backed) ram_image=false; shift ;;
             --ram-image)  ram_image=true; shift ;;  # keep as hidden/legacy alias
             --local-vars) local_vars="$2"; shift 2 ;;
-            --fallback)   fallback=true; shift ;;
+            --wildcard)   wildcard=true; shift ;;
             --description) description="$2"; shift 2 ;;
             --build-on-disk) build_on_disk=true; shift ;;
             --fg)         foreground=true; shift ;;
@@ -469,7 +469,7 @@ VOLATILE="$volatile"
 RAM_IMAGE=$ram_image
 BUILD_ON_DISK=$build_on_disk
 LOCAL_VARS="$local_vars"
-FALLBACK=$fallback
+WILDCARD=$wildcard
 DESCRIPTION="$description"
 EOF
 
@@ -782,7 +782,7 @@ cmd_rebuild() {
             RAM_IMAGE)     ram_image=$value ;;
             BUILD_ON_DISK) build_on_disk=$value ;;
             LOCAL_VARS)    local_vars="$value" ;;
-            FALLBACK)      fallback=$value ;;
+            WILDCARD)      wildcard=$value ;;
             DESCRIPTION)   description="$value" ;;
         esac
     done
@@ -795,7 +795,7 @@ cmd_rebuild() {
     [ "${ram_image:-true}" = "false" ] && add_args+=("--disk-backed")
     [ "${build_on_disk:-false}" = "true" ] && add_args+=("--build-on-disk")
     [ -n "${local_vars:-}" ] && add_args+=("--local-vars" "$local_vars")
-    [ "${fallback:-false}" = "true" ] && add_args+=("--fallback")
+    [ "${wildcard:-false}" = "true" ] && add_args+=("--wildcard")
     [ -n "${description:-}" ] && add_args+=("--description" "$description")
 
     cmd_add "${add_args[@]}"
@@ -1132,7 +1132,7 @@ Add flags:
   --disk-backed             Keep image on disk instead of RAM (default: no)
   --volatile <mode>         no | yes | state (default: state)
   --local-vars <path>       Path to local_vars.yml (relative to IIAB repo in container)
-  --fallback                Use as fallback for unknown subdomains
+  --wildcard                Use as wildcard for unknown subdomains
   --description <text>      Human-readable description
   --build-on-disk           Build on disk instead of RAM (default: build in RAM)
   --fg                      Build in foreground (default: background)

@@ -42,12 +42,12 @@ if [ ${#demo_names[@]} -eq 0 ]; then
     exit 0
 fi
 
-# Find fallback domain first
+# Find wildcard domain first
 fallback_domain="large.iiab.io"
 for name in "${demo_names[@]}"; do
     # shellcheck source=/dev/null
     source "$ACTIVE_DIR/$name/config"
-    if [ "${FALLBACK:-false}" = "true" ]; then
+    if [ "${WILDCARD:-false}" = "true" ]; then
         fallback_domain="$(sanitize_subdomain "${SUBDOMAIN:-$name}").iiab.io"
         break
     fi

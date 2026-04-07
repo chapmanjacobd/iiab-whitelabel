@@ -31,7 +31,7 @@ medium:
 large:
 	bash democtl add large \
 		--size 30000 \
-		--fallback \
+		--wildcard \
 		--local-vars vars/local_vars_large.yml
 
 # Status of all demos (or specify a name with NAME=)
