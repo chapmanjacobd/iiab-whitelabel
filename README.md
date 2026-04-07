@@ -54,26 +54,24 @@ Installs packages, configures bridge networking, sets up nginx skeleton.
 
 ```bash
 # Apply all demos from demos.sh
-sudo democtl apply demos.sh
+make deploy
 
 # Or add individually
-sudo democtl add small
-sudo democtl add large
+make small
+make large
 ```
-
-`apply` reads `demos.sh`, adds any missing demos, removes any extras, and regenerates nginx.
 
 ### 3. Check status
 
 ```bash
-sudo democtl list
-sudo democtl status small
+make list
+make status NAME=small
 ```
 
 ### 4. Get SSL certs
 
 ```bash
-sudo democtl certbot
+make certbot
 ```
 
 ## democtl CLI
@@ -98,7 +96,6 @@ democtl reconcile                     Fix resource counter drift
 
 | Flag | Default | Description |
 |---|---|---|
-| `--edition` | *name* | IIAB edition: small, medium, large |
 | `--repo` | `github.com/iiab/iiab.git` | IIAB git repository |
 | `--branch` | `master` | Git branch/tag/ref |
 | `--size` | 15000 | Image size in MB |
@@ -106,7 +103,7 @@ democtl reconcile                     Fix resource counter drift
 | `--ram-image` | true | Keep final image in host RAM |
 | `--no-ram-image` | — | Copy final image to disk |
 | `--build-on-disk` | — | Build on disk instead of RAM (override default) |
-| `--local-vars` | `vars/local_vars_<ed>.yml` | Path to IIAB local_vars.yml |
+| `--local-vars` | `vars/local_vars_<name>.yml` | Path to IIAB local_vars.yml |
 | `--fallback` | false | Use as fallback for unknown subdomains |
 | `--description` | — | Human-readable description |
 | `--fg` | false | Build in foreground |
@@ -114,57 +111,48 @@ democtl reconcile                     Fix resource counter drift
 ### Examples
 
 ```bash
-# Standard RAM demo (builds in RAM, runs from RAM)
-democtl add small --edition small --size 12000
+# Standard RAM demo
+democtl add small --local-vars vars/local_vars_small.yml --size 12000
 
 # Test a pull request
 democtl add pr3612 \
-  --edition large \
+  --local-vars vars/local_vars_large.yml \
   --branch refs/pull/3612/head \
   --volatile yes \
   --description "Testing PR #3612"
 
 # Production: persistent on disk
 democtl add production \
-  --edition large \
+  --local-vars vars/local_vars_large.yml \
   --volatile no \
   --no-ram-image
 
 # Build on disk (e.g., low-RAM environment)
-democtl add small --edition small --build-on-disk
+democtl add small --local-vars vars/local_vars_small.yml --build-on-disk
 ```
 
-## demos.sh — Declarative configuration
+## Makefile shortcuts
+
+The `small`, `medium`, and `large` targets add individual demos. `deploy` reads `demos.sh`:
 
 ```bash
-# demos.sh - demo definitions
-# local_vars paths are relative to the IIAB repo cloned into each container
-
-demo add small \
-  --edition small --branch master --size 12000 \
-  --volatile state --ram-image \
-  --local-vars vars/local_vars_small.yml
-
-demo add medium \
-  --edition medium --branch master --size 20000 \
-  --volatile state --ram-image \
-  --local-vars vars/local_vars_medium.yml
-
-demo add large \
-  --edition large --branch master --size 30000 \
-  --volatile state --ram-image --fallback \
-  --local-vars vars/local_vars_large.yml
+make small medium large    # Add all three demos
+make deploy                # Apply demos.sh (add missing, remove extras, reload nginx)
+make list                  # List all demos
+make status                # Show status of all demos
+make logs NAME=small       # View logs for a demo
+make ramfs-status          # Check RAM usage
+make stop                  # Stop all demos
+make clean                 # Remove everything
 ```
-
-Run `democtl apply demos.sh` to ensure these are all running. Add or remove demos in the file, then re-apply.
 
 ## Directory Structure
 
 ```
 iiab-whitelabel/
 ├── democtl                    # Main CLI
-├── demos.sh                   # Default demo config
-├── Makefile                   # Thin wrapper around democtl
+├── demos.sh                   # Default demo config (for `democtl apply`)
+├── Makefile                   # CLI wrapper with convenience targets
 ├── README.md
 └── scripts/
     ├── build-container.sh     # Build IIAB (all mount/loop/shrink logic inlined)
@@ -236,10 +224,11 @@ Called automatically after each demo builds successfully, or via `democtl reload
 
 ```bash
 make init             # Bootstrap host
-make deploy           # Apply demos.sh
+make deploy           # Apply all demos (add missing, remove extras, reload nginx)
+make small medium large  # Add individual demos
 make list             # List all demos
-make add-small        # Add small demo
-make rebuild-large    # Rebuild large demo
+make status           # Show status of all demos
+make logs NAME=small  # View logs for a demo
 make ramfs-status     # Check RAM usage
 make stop             # Stop all demos
 make clean            # Remove everything

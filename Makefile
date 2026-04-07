@@ -1,12 +1,8 @@
 # IIAB Whitelabel Demo Server
-# Thin wrapper around democtl CLI
+# CLI wrapper with convenience targets
 
-.PHONY: help init deploy list status apply \
-        add-small add-medium add-large \
-        remove-small remove-medium remove-large \
-        rebuild-small rebuild-medium rebuild-large \
-        ramfs-load ramfs-unload ramfs-status ramfs-cleanup \
-        reload certbot stop clean reconcile
+.PHONY: help init deploy list status logs reload certbot stop clean reconcile test \
+        small medium large
 
 # Default target
 help:
@@ -16,17 +12,41 @@ help:
 init:
 	bash democtl init
 
-# Apply default config
+# Apply all demos from demos.sh (add missing, remove extras, regenerate nginx)
 deploy:
 	bash democtl apply demos.sh
+
+# Convenience targets — add a single demo
+small:
+	bash democtl add small \
+		--branch master \
+		--size 12000 \
+		--volatile state \
+		--ram-image \
+		--local-vars vars/local_vars_small.yml
+
+medium:
+	bash democtl add medium \
+		--branch master \
+		--size 20000 \
+		--volatile state \
+		--ram-image \
+		--local-vars vars/local_vars_medium.yml
+
+large:
+	bash democtl add large \
+		--branch master \
+		--size 30000 \
+		--volatile state \
+		--ram-image \
+		--fallback \
+		--local-vars vars/local_vars_large.yml
 
 # List all demos
 list:
 	bash democtl list
 
 # Status of all demos (or specify a name with NAME=)
-#   make status          → list all
-#   make status NAME=small  → status of small
 status:
 	@if [ -n "$(NAME)" ]; then \
 		bash democtl status "$(NAME)"; \
@@ -34,48 +54,11 @@ status:
 		bash democtl list; \
 	fi
 
-# Convenience targets for the three default demos
-add-small:
-	bash democtl add small
-
-add-medium:
-	bash democtl add medium
-
-add-large:
-	bash democtl add large
-
-remove-small:
-	bash democtl remove small
-
-remove-medium:
-	bash democtl remove medium
-
-remove-large:
-	bash democtl remove large
-
-rebuild-small:
-	bash democtl rebuild small
-
-rebuild-medium:
-	bash democtl rebuild medium
-
-rebuild-large:
-	bash democtl rebuild large
-
-# Operations
-shell-small:
-	bash democtl shell small
-
-shell-medium:
-	bash democtl shell medium
-
-shell-large:
-	bash democtl shell large
-
+# Logs for a specific demo (make logs NAME=small)
 logs:
 	bash democtl logs $(or $(NAME),)
 
-# Infrastructure
+# Operations
 reload:
 	bash democtl reload
 
@@ -93,7 +76,7 @@ test:
 	bash democtl help >/dev/null
 	@echo "All local tests passed."
 
-# RAMFS management
+# RAMFS management (direct passthrough)
 ramfs-load:
 	bash democtl ramfs load
 

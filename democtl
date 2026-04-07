@@ -355,8 +355,8 @@ cmd_init() {
     ensure_state_dirs
     echo ""
     echo "Host initialized. Now add demos with:"
-    echo "  democtl add small"
-    echo "  democtl apply demos.sh"
+    echo "  democtl add small --local-vars vars/local_vars_small.yml --size 12000"
+    echo "  make small medium large"
 }
 
 ###############################################################################
@@ -366,7 +366,7 @@ cmd_add() {
     ensure_root "$@"
 
     # Defaults
-    local name="" edition="" branch="master"
+    local name="" branch="master"
     local repo="https://github.com/iiab/iiab.git"
     local size_mb=15000 volatile="state" ram_image=true
     local local_vars="" fallback=false description=""
@@ -376,7 +376,6 @@ cmd_add() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             add) shift ;;  # skip 'add' from parsed demos.sh
-            --edition)    edition="$2"; shift 2 ;;
             --branch)     branch="$2"; shift 2 ;;
             --repo)       repo="$2"; shift 2 ;;
             --size)       size_mb="$2"; shift 2 ;;
@@ -401,7 +400,7 @@ cmd_add() {
 
     if [ -z "$name" ]; then
         echo "Error: demo name required" >&2
-        echo "Usage: democtl add <name> --edition <edition> [--branch <branch>] ..." >&2
+        echo "Usage: democtl add <name> [--branch <branch>] ..." >&2
         return 1
     fi
 
@@ -426,10 +425,6 @@ cmd_add() {
     if [ -n "$local_vars" ] && [[ "$local_vars" == /* ]] && [ ! -f "$local_vars" ]; then
         echo "Error: local-vars file not found: $local_vars" >&2
         return 1
-    fi
-
-    if [ -z "$edition" ]; then
-        edition="$name"
     fi
 
     ensure_state_dirs
@@ -467,8 +462,6 @@ cmd_add() {
     # Write config (under lock)
     cat > "$demo_dir/config" << EOF
 DEMO_NAME="$name"
-SUBDOMAIN="${name}"
-EDITION="$edition"
 IIAB_REPO="$repo"
 IIAB_BRANCH="$branch"
 IMAGE_SIZE_MB=$size_mb
@@ -600,7 +593,6 @@ build_demo() {
     # shellcheck disable=SC2153
     local build_args=(
         "--name" "$name"
-        "--edition" "$EDITION"
         "--repo" "$IIAB_REPO"
         "--branch" "$IIAB_BRANCH"
         "--size" "$IMAGE_SIZE_MB"
@@ -620,7 +612,7 @@ build_demo() {
         build_args+=("--local-vars" "$LOCAL_VARS")
     fi
 
-    log_demo "$name" "Building: edition=$EDITION branch=$IIAB_BRANCH volatile=$VOLATILE ram_image=$RAM_IMAGE"
+    log_demo "$name" "Building: branch=$IIAB_BRANCH volatile=$VOLATILE ram_image=$RAM_IMAGE"
     log_demo "$name" "This will take 30-60 minutes..."
 
     if ! bash "$build_script" "${build_args[@]}"; then
@@ -783,7 +775,6 @@ cmd_rebuild() {
     # Re-add with saved config
     echo "$saved_config" | while IFS='=' read -r key value; do
         case "$key" in
-            EDITION)       edition="$value" ;;
             IIAB_BRANCH)   branch="$value" ;;
             IIAB_REPO)     repo="$value" ;;
             IMAGE_SIZE_MB) size_mb="$value" ;;
@@ -796,7 +787,7 @@ cmd_rebuild() {
         esac
     done
 
-    local add_args=("$name" "--edition" "${edition:-$name}")
+    local add_args=("$name")
     [ -n "${branch:-}" ] && add_args+=("--branch" "$branch")
     [ -n "${repo:-}" ] && add_args+=("--repo" "$repo")
     [ -n "${size_mb:-}" ] && add_args+=("--size" "${size_mb:-15000}")
@@ -871,8 +862,7 @@ cmd_status() {
     status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
 
     echo "=== Demo: $name ==="
-    echo "Subdomain:  ${SUBDOMAIN:-$name}.iiab.io"
-    echo "Edition:    $EDITION"
+    echo "Subdomain:  ${name}.iiab.io"
     echo "Branch:     $IIAB_BRANCH"
     echo "Repo:       $IIAB_REPO"
     echo "IP:         $ip"
@@ -1237,14 +1227,13 @@ Commands:
   reconcile                     Fix resource counter drift and check ghost IPs
 
 Add flags:
-  --edition <edition>       IIAB edition: small, medium, large (default: name)
   --repo <url>              IIAB git repo (default: github.com/iiab/iiab.git)
   --branch <ref>            Git branch/tag/ref (default: master)
   --size <MB>               Image size (default: 15000)
   --volatile <mode>         no | yes | state (default: state)
   --ram-image               Load image into host RAM (default: true)
   --no-ram-image            Keep image on disk
-  --local-vars <path>       Path to local_vars.yml
+  --local-vars <path>       Path to local_vars.yml (relative to IIAB repo in container)
   --fallback                Use as fallback for unknown subdomains
   --description <text>      Human-readable description
   --build-on-disk           Build on disk instead of RAM (default: build in RAM)
@@ -1253,8 +1242,8 @@ Add flags:
 Examples:
   democtl init
   democtl apply demos.sh
-  democtl add small --edition small --size 12000
-  democtl add pr3612 --edition large --branch refs/pull/3612/head --volatile yes
+  democtl add small --local-vars vars/local_vars_small.yml --size 12000
+  democtl add pr3612 --local-vars vars/local_vars_large.yml --branch refs/pull/3612/head --volatile yes
   democtl list
   democtl status small
   democtl remove pr3612

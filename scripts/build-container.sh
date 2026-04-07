@@ -6,7 +6,7 @@
 # copied to persistent disk. Use --build-on-disk to override.
 #
 # Usage:
-#   build-container.sh --name <name> --edition <edition> \
+#   build-container.sh --name <name> \
 #     --repo <repo> --branch <branch> --size <MB> \
 #     --volatile <mode> --ip <ip> [--ram-image] [--build-on-disk] \
 #     [--local-vars <path>] [--image-source <path>]
@@ -14,7 +14,6 @@ set -euo pipefail
 
 # Defaults
 NAME=""
-EDITION=""
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 SIZE_MB=15000
@@ -29,7 +28,6 @@ BUILD_ON_DISK=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --name)       NAME="$2"; shift 2 ;;
-        --edition)    EDITION="$2"; shift 2 ;;
         --repo)       IIAB_REPO="$2"; shift 2 ;;
         --branch)     IIAB_BRANCH="$2"; shift 2 ;;
         --size)       SIZE_MB="$2"; shift 2 ;;
@@ -51,9 +49,6 @@ if [ -z "$NAME" ]; then
     echo "Error: --name required" >&2
     exit 1
 fi
-if [ -z "$EDITION" ]; then
-    EDITION="$NAME"
-fi
 if [ -z "$IP" ]; then
     echo "Error: --ip required" >&2
     exit 1
@@ -62,7 +57,6 @@ fi
 echo "=========================================="
 echo "Building IIAB container: $NAME"
 echo "=========================================="
-echo "Edition:      $EDITION"
 echo "Branch:       $IIAB_BRANCH"
 echo "Repo:         $IIAB_REPO"
 echo "Size:         ${SIZE_MB}MB"
@@ -214,7 +208,7 @@ fi
 if [[ "$LOCAL_VARS" != /* ]] && [ -n "$LOCAL_VARS" ]; then
     IIAB_VARS_PATH="$LOCAL_VARS"
 elif [ -z "$LOCAL_VARS" ]; then
-    IIAB_VARS_PATH="vars/local_vars_${EDITION}.yml"
+    IIAB_VARS_PATH="vars/local_vars_${NAME}.yml"
 else
     IIAB_VARS_PATH=""
 fi
@@ -334,7 +328,6 @@ echo "=== Step 4: Shrinking image ==="
 {
     echo "$NAME"
     echo "Build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "Edition: $EDITION"
     echo "Branch: $IIAB_BRANCH"
     echo "Repo: $IIAB_REPO"
 } >> "$MOUNT_DIR/.iiab-image"

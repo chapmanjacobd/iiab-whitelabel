@@ -23,7 +23,6 @@
 #   --fallback      Mark as fallback for unknown subdomains
 
 demo add small \
-  --edition small \
   --branch master \
   --size 12000 \
   --volatile state \
@@ -31,7 +30,6 @@ demo add small \
   --local-vars vars/local_vars_small.yml
 
 demo add medium \
-  --edition medium \
   --branch master \
   --size 20000 \
   --volatile state \
@@ -39,7 +37,6 @@ demo add medium \
   --local-vars vars/local_vars_medium.yml
 
 demo add large \
-  --edition large \
   --branch master \
   --size 30000 \
   --volatile state \
@@ -49,8 +46,6 @@ demo add large \
 
 # Example: test a pull request
 # demo add pr3612 \
-#   --edition large \
-#   --repo https://github.com/iiab/iiab.git \
 #   --branch refs/pull/3612/head \
 #   --size 30000 \
 #   --volatile yes \

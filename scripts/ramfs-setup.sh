@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ramfs-setup.sh - Manage tmpfs mounts for container images in RAM
-# Usage: ./ramfs-setup.sh <action> [edition]
+# Usage: ./ramfs-setup.sh <action> [name]
 #   action: load, unload, status, cleanup
 #
 # When ram_image is enabled, the .raw image is copied to a tmpfs mount
