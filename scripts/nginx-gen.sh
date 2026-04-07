@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016
 # nginx-gen.sh - Dynamically generate nginx config from active demos
 # Reads /var/lib/iiab-demos/active/*/config and produces nginx config
 set -euo pipefail

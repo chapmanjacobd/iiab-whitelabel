@@ -162,7 +162,7 @@ if command -v sgdisk &>/dev/null; then
 fi
 
 # Wait for partition device
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
     [ -b "${LOOPDEV}p1" ] && break
     sleep 1
 done
@@ -330,11 +330,13 @@ echo ""
 echo "=== Step 4: Shrinking image ==="
 
 # Add metadata before cleanup
-echo "$NAME" > "$MOUNT_DIR/.iiab-image"
-echo "Build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MOUNT_DIR/.iiab-image"
-echo "Edition: $EDITION" >> "$MOUNT_DIR/.iiab-image"
-echo "Branch: $IIAB_BRANCH" >> "$MOUNT_DIR/.iiab-image"
-echo "Repo: $IIAB_REPO" >> "$MOUNT_DIR/.iiab-image"
+{
+    echo "$NAME"
+    echo "Build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Edition: $EDITION"
+    echo "Branch: $IIAB_BRANCH"
+    echo "Repo: $IIAB_REPO"
+} >> "$MOUNT_DIR/.iiab-image"
 
 # Clean up
 echo uninitialized > "$MOUNT_DIR/etc/machine-id"

@@ -7,9 +7,6 @@
 # so the container boots entirely from RAM — no disk I/O after initial load.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-
 ACTION="${1:?Error: Action required (load, unload, status, cleanup)}"
 NAME="${2:-}"
 RAMFS_ROOT="/run/iiab-ramfs"

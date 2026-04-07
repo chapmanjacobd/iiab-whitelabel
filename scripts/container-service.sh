@@ -38,9 +38,6 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# Determine image path (always /var/lib/machines/ for the nspawn service)
-IMAGE_PATH="/var/lib/machines/${NAME}.raw"
-
 # Create nspawn settings directory
 SETTINGS_DIR="/etc/systemd/nspawn"
 mkdir -p "$SETTINGS_DIR"
