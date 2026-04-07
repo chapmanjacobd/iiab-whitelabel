@@ -53,13 +53,16 @@ cat > "${SETTINGS_DIR}/${NAME}.nspawn" << EOF
 [Exec]
 Hostname=${NAME}
 Boot=true
-PrivateUsers=no
-
+PrivateUsers=pick
 NoNewPrivileges=yes
+Capability=CAP_NET_BIND_SERVICE
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @reboot @swap @mount @debug @clock @module @raw-io @reboot
 
 [Network]
-VirtualEthernet=true
+VirtualEthernet=yes
 Bridge=iiab-br0
+PrivateNetworking=yes
 
 ${FILES_SECTION}
 EOF
@@ -83,6 +86,27 @@ cat > "${SERVICE_OVERRIDE}/override.conf" << EOF
 [Service]
 Restart=${RESTART_POLICY}
 RestartSec=30
+
+# Filesystem restrictions
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/machines/${NAME}
+
+# Device access restrictions
+DevicePolicy=closed
+DeviceAllow=char-random rw
+
+# Privilege restrictions
+NoNewPrivileges=yes
+
+# Additional hardening
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
 EOF
 
 echo "Created ${SERVICE_OVERRIDE}/override.conf"
