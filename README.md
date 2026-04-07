@@ -8,7 +8,32 @@ Demo server infrastructure for Internet-in-a-Box (IIAB) with subdomain-based con
 - **Containers**: systemd-nspawn containers running different IIAB editions
 - **Reverse Proxy**: nginx routes `*.iiab.io` subdomains to containers (dynamically generated)
 - **TLS**: Let's Encrypt certificates per subdomain via certbot
-- **CLI**: `democtl` manages the entire lifecycle — no hardcoded playbooks
+- **CLI**: `democtl` manages the entire lifecycle
+
+## Build Model
+
+**All builds happen in RAM (tmpfs) by default** — zero disk I/O during the build.
+
+```
+Base image (disk, shared ~500MB)
+        ↓
+    cp to tmpfs (build workspace)
+        ↓
+    grow → loop → mount → clone IIAB → install → shrink
+        ↓
+   ┌──────┴──────┐
+   │ --ram-image │  (default)
+   │   → RAM     │  final image in /run/iiab-ramfs/
+   └─────────────┘
+
+   ┌──────────────┐
+   │ (no flag)    │  final image copied to /var/lib/machines/
+   │   → disk     │  tmpfs cleaned up
+   └──────────────┘
+```
+
+After shrinking, the image is either kept in RAM or copied to persistent disk.
+Use `--build-on-disk` to override and build on disk instead of RAM.
 
 ## Quick Start
 
@@ -20,7 +45,7 @@ Demo server infrastructure for Internet-in-a-Box (IIAB) with subdomain-based con
 ### 1. Initialize the host
 
 ```bash
-sudo bash democtl init
+sudo democtl init
 ```
 
 Installs packages, configures bridge networking, sets up nginx skeleton.
@@ -29,11 +54,11 @@ Installs packages, configures bridge networking, sets up nginx skeleton.
 
 ```bash
 # Apply all demos from demos.sh
-sudo bash democtl apply demos.sh
+sudo democtl apply demos.sh
 
 # Or add individually
-sudo bash democtl add small
-sudo bash democtl add large
+sudo democtl add small
+sudo democtl add large
 ```
 
 `apply` reads `demos.sh`, adds any missing demos, removes any extras, and regenerates nginx.
@@ -41,14 +66,14 @@ sudo bash democtl add large
 ### 3. Check status
 
 ```bash
-sudo bash democtl list
-sudo bash democtl status small
+sudo democtl list
+sudo democtl status small
 ```
 
 ### 4. Get SSL certs
 
 ```bash
-sudo bash democtl certbot
+sudo democtl certbot
 ```
 
 ## democtl CLI
@@ -56,16 +81,17 @@ sudo bash democtl certbot
 ```
 democtl init                          Bootstrap host (packages, network, nginx)
 democtl apply [demos.sh]              Ensure all demos in config are running
-democtl add <name> [flags]            Add single demo (--bg default, returns immediately)
+democtl add <name> [flags]            Add single demo (background build by default)
 democtl remove <name>                 Stop + delete demo + free resources
-democtl rebuild <name>                Remove + add
+democtl rebuild <name>                Remove + add (preserves config)
 democtl list                          Show all demos
 democtl status <name>                 Detailed status + build log
 democtl logs <name>                   Build log or container journal
-democtl shell <name>                  machinectl shell
+democtl shell <name>                  Open shell in container
 democtl reload                        Regenerate nginx from active demos
 democtl certbot                       Obtain/renew Let's Encrypt certs
 democtl ramfs <load|unload|status>    Manage tmpfs images
+democtl reconcile                     Fix resource counter drift
 ```
 
 ### Add flags
@@ -77,8 +103,9 @@ democtl ramfs <load|unload|status>    Manage tmpfs images
 | `--branch` | `master` | Git branch/tag/ref |
 | `--size` | 15000 | Image size in MB |
 | `--volatile` | `state` | `no` / `yes` / `state` |
-| `--ram-image` | true | Load image into host tmpfs |
-| `--no-ram-image` | — | Keep image on disk |
+| `--ram-image` | true | Keep final image in host RAM |
+| `--no-ram-image` | — | Copy final image to disk |
+| `--build-on-disk` | — | Build on disk instead of RAM (override default) |
 | `--local-vars` | `vars/local_vars_<ed>.yml` | Path to IIAB local_vars.yml |
 | `--fallback` | false | Use as fallback for unknown subdomains |
 | `--description` | — | Human-readable description |
@@ -87,32 +114,30 @@ democtl ramfs <load|unload|status>    Manage tmpfs images
 ### Examples
 
 ```bash
-# Standard demo
+# Standard RAM demo (builds in RAM, runs from RAM)
 democtl add small --edition small --size 12000
 
-# Test a pull request (isolated, safe — git only fetches from configured repo)
+# Test a pull request
 democtl add pr3612 \
   --edition large \
   --branch refs/pull/3612/head \
   --volatile yes \
   --description "Testing PR #3612"
 
-# Test a feature branch
-democtl add new-maps \
-  --branch feature/new-maps \
-  --volatile state
-
-# Production-grade: persistent on disk
+# Production: persistent on disk
 democtl add production \
   --edition large \
   --volatile no \
   --no-ram-image
+
+# Build on disk (e.g., low-RAM environment)
+democtl add small --edition small --build-on-disk
 ```
 
-## demos.sh — Default configuration
+## demos.sh — Declarative configuration
 
 ```bash
-# demos.sh - declarative demo definitions
+# demos.sh - demo definitions
 # local_vars paths are relative to the IIAB repo cloned into each container
 
 demo add small \
@@ -141,41 +166,41 @@ iiab-whitelabel/
 ├── demos.sh                   # Default demo config
 ├── Makefile                   # Thin wrapper around democtl
 ├── README.md
-├── .gitignore
 └── scripts/
-    ├── build-container.sh     # Build IIAB inside nspawn (arbitrary repo/branch)
+    ├── build-container.sh     # Build IIAB (all mount/loop/shrink logic inlined)
     ├── container-service.sh   # Create .nspawn systemd config
-    ├── host-setup.sh          # Idempotent host provisioning (replaces Ansible)
-    ├── certbot-setup.sh       # Idempotent SSL certificate setup (replaces Ansible)
-    ├── ramfs-setup.sh         # Manage tmpfs image loading
+    ├── host-setup.sh          # Host provisioning
+    ├── certbot-setup.sh       # SSL certificate setup
+    ├── ramfs-setup.sh         # Manage tmpfs demo images
     └── nginx-gen.sh           # Dynamic nginx from active demos
 ```
 
-**Note**: The `vars/` directory has been removed. Each demo uses `local_vars_*.yml` files from the IIAB repo that gets cloned into the container during build. The `--local-vars` path is **relative to the cloned IIAB repository** — e.g., `vars/local_vars_small.yml` means the file must exist at `vars/local_vars_small.yml` inside the IIAB repo at the specified branch/ref. If you're testing a custom branch that doesn't have these files, the build will fail.
+The `--local-vars` path is **relative to the IIAB repository** cloned into each container during build — e.g., `vars/local_vars_small.yml` must exist at that path inside the IIAB repo at the specified `--branch`/`--repo`.
 
 ## Deployment Modes
 
 Two independent toggles:
 
-| `volatile` | `ram_image` | Behavior | Disk I/O | Speed |
-|---|---|---|---|---|
-| `no` | `no` | Persistent on disk | Writes | Normal |
-| `yes` | `no` | Clean boot, image on disk | Read-only | Normal |
-| `state` | `no` | /var overlay, /usr read-only | Read-only | Normal |
-| `no` | `yes` | Persistent in RAM | No (after copy) | Fast |
-| `yes` | `yes` | Clean boot from RAM | None | **Fastest** |
-| `state` | `yes` | /var overlay from RAM | None | Fast |
+| `volatile` | `ram-image` | Behavior | Runtime |
+|---|---|---|---|
+| `no` | `no` | Persistent on disk | Disk-backed |
+| `yes` | `no` | Clean boot, image on disk | Disk, stateless |
+| `state` | `no` | /var overlay, /usr read-only | Disk, /var resets |
+| `no` | `yes` | Persistent in RAM | RAM-backed |
+| `yes` | `yes` | Clean boot from RAM | RAM, stateless |
+| `state` | `yes` | /var overlay, from RAM | RAM, /var resets |
 
-**Default**: `volatile: state, ram_image: true` — OS immutable in RAM, `/var` resets each boot.
+**Default**: `volatile: state`, `ram-image: true` — OS immutable in RAM, `/var` resets each boot.
 
 ## Resource Management
 
 `democtl add` checks resources **before** starting a build:
 
-- **Disk**: If `--no-ram-image`, verifies ≥ size + 2GB free on `/var/lib/machines`
-- **RAM**: If `--ram-image`, verifies ≥ size + 512MB available RAM
+- **RAM**: All demos build in tmpfs — verifies ≥ size + 512MB available RAM
+- **Disk (non-ram-image only)**: Also verifies ≥ size + 500MB free on `/var/lib/machines` for the final image
+- **Disk (ram-image)**: Only needs ~1GB for the shared base image
 
-If resources are insufficient, it prints what's needed vs available and aborts cleanly. Allocations are tracked per-demo and freed on `democtl remove`.
+Insufficient resources print what's needed vs available and abort cleanly. Allocations are tracked per-demo and freed on `remove`.
 
 ```bash
 democtl list    # Shows RAM allocation per demo
@@ -189,8 +214,8 @@ democtl list    # Shows RAM allocation per demo
 2. Assigns next free IP from the subnet pool (`10.0.3.2`, `.3`, `.4`...)
 3. Writes config to `/var/lib/iiab-demos/active/<name>/`
 4. Forks `build-container.sh` in background (returns immediately)
-5. Background: clones IIAB → installs in nspawn → shrinks image → imports with machinectl
-6. On success: registers container, starts it, regenerates nginx
+5. Background: copies base image to tmpfs → grows + mounts → clones IIAB → installs → shrinks → registers
+6. On success: starts container via systemd-nspawn, regenerates nginx
 
 ### nginx generation
 
@@ -205,7 +230,6 @@ Called automatically after each demo builds successfully, or via `democtl reload
 
 - `--branch` can be any git ref: branch, tag, `refs/pull/NNNN/head`, commit hash
 - Git only fetches from the explicitly configured `--repo` URL
-- The `--risky` IIAB installer flag is controlled by the host admin
 - Each build runs in an isolated nspawn container with its own network namespace
 
 ## Makefile shortcuts
@@ -248,7 +272,6 @@ cat /etc/systemd/nspawn/<name>.nspawn
 ```bash
 democtl list              # Verify container is running
 democtl shell <name>      # Check inside container
-machinectl shell <name> ip addr
 ```
 
 ## License
