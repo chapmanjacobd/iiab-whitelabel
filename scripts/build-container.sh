@@ -283,6 +283,7 @@ iptables -C FORWARD -i ve-+ -o "$EXT_IF" -j ACCEPT 2>/dev/null || {
 }
 
 systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force
+rm -f "$MOUNT_DIR/etc/resolv.conf"
 echo "nameserver 8.8.8.8" > "$MOUNT_DIR/etc/resolv.conf"
 
 # Build script to run inside container
