@@ -50,7 +50,7 @@ jobs:
           sudo ./democtl add unittest \
             --size 4000 \
             --local-vars vars/local_vars_unittest.yml \
-            --skip-install --fg --repo github.com/chapmanjacobd/iiab --branch rpi_image/genericvm
+            --fg --repo github.com/chapmanjacobd/iiab --branch rpi_image/genericvm
 
       - name: Verify build
         run: |
