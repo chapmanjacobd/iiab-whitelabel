@@ -108,9 +108,8 @@ NoNewPrivileges=yes
 # Restrict socket families to what's needed for web services + netlink for networking
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
 
-# Syscall / namespace restrictions
+# Syscall architecture - only allow native syscalls
 SystemCallArchitectures=native
-RestrictNamespaces=yes
 
 # Memory restrictions
 RestrictRealtime=yes
