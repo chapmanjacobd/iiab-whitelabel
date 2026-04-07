@@ -247,7 +247,6 @@ fi
 
 # Set image-building flag so services know they're building an image (not running live)
 # This prevents service restarts during build and lets them use 'stopped' instead
-echo "rpi_image: True" >> "$MOUNT_DIR/etc/iiab/local_vars.yml"
 
 # Set hostname
 echo "$NAME" > "$MOUNT_DIR/etc/hostname"
@@ -303,8 +302,8 @@ expect -re {#\s?$} { send "export PAGER=cat SYSTEMD_PAGER=cat\r" }
 # Debian cloud image prep: generate SSH host keys, start sshd
 expect -re {#\s?$} { send "ssh-keygen -A\r" }
 
-# Start ssh service before build; debug if it fails
-expect -re {#\s?$} { send "systemctl enable ssh; if ! systemctl start ssh 2>&1; then systemctl status ssh; journalctl -xeu ssh; fi\r" }
+# Start ssh service before build; if it fails, mask it to prevent restart loops
+expect -re {#\s?$} { send "systemctl enable ssh; if ! systemctl start ssh 2>&1; then systemctl mask ssh; fi\r" }
 
 expect -re {#\s?$} { send "/root/run_build.sh; echo \"BUILD_EXIT_CODE:\$?\"\r" }
 
@@ -353,7 +352,6 @@ rm -f "$MOUNT_DIR/etc/iiab/uuid"
 rm -f "$MOUNT_DIR/var/swap"
 touch "$MOUNT_DIR/.resize-rootfs"
 
-sed -i '/rpi_image: True/d' "$MOUNT_DIR/etc/iiab/local_vars.yml"
 
 # Clean rootfs via nspawn
 systemd-nspawn -q -D "$MOUNT_DIR" --pipe /bin/bash -eux << 'CLEANEOF'
