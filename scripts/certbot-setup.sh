@@ -45,16 +45,30 @@ STATE_DIR="/var/lib/iiab-demos"
 ACTIVE_DIR="$STATE_DIR/active"
 DOMAINS=()
 
+# Sanitize subdomain name for nginx/certbot compatibility
+sanitize_subdomain() {
+    local raw="$1"
+    local cleaned
+    cleaned=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+    cleaned="${cleaned#-}"
+    cleaned="${cleaned%-}"
+    if [ -z "$cleaned" ]; then
+        echo "demo"
+    else
+        echo "$cleaned"
+    fi
+}
+
 if [ -d "$ACTIVE_DIR" ]; then
     for demo_dir in "$ACTIVE_DIR"/*/; do
         [ -d "$demo_dir" ] || continue
         demo_name=$(basename "$demo_dir")
-        
+
         # Read subdomain from config
         if [ -f "$demo_dir/config" ]; then
             # shellcheck source=/dev/null
             source "$demo_dir/config"
-            subdomain="${SUBDOMAIN:-$demo_name}"
+            subdomain="$(sanitize_subdomain "${SUBDOMAIN:-$demo_name}")"
         else
             subdomain="$demo_name"
         fi

@@ -8,6 +8,22 @@ ACTIVE_DIR="$STATE_DIR/active"
 NGINX_CONF="/etc/nginx/sites-available/iiab-demo.conf"
 CERTBOT_ROOT="/var/www/certbot"
 
+# Sanitize a name into a valid nginx server_name / upstream-safe identifier
+sanitize_subdomain() {
+    local raw="$1"
+    # Lowercase, strip anything except a-z 0-9 and hyphen
+    local cleaned
+    cleaned=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+    # Remove leading/trailing hyphens
+    cleaned="${cleaned#-}"
+    cleaned="${cleaned%-}"
+    if [ -z "$cleaned" ]; then
+        echo "demo"  # fallback
+    else
+        echo "$cleaned"
+    fi
+}
+
 # Collect active demos into array
 demo_names=()
 for demo_dir in "$ACTIVE_DIR"/*/; do
@@ -28,7 +44,7 @@ for name in "${demo_names[@]}"; do
     # shellcheck source=/dev/null
     source "$ACTIVE_DIR/$name/config"
     if [ "${FALLBACK:-false}" = "true" ]; then
-        fallback_domain="${SUBDOMAIN:-$name}.iiab.io"
+        fallback_domain="$(sanitize_subdomain "${SUBDOMAIN:-$name}").iiab.io"
         break
     fi
 done
@@ -49,147 +65,120 @@ HEADER
         # shellcheck source=/dev/null
         source "$ACTIVE_DIR/$name/config"
         ip=$(cat "$ACTIVE_DIR/$name/ip")
-        subdomain="${SUBDOMAIN:-$name}"
+        subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
         upstream_name=$(echo "$name" | tr '-' '_')
         all_server_names="${all_server_names}${subdomain}.iiab.io "
 
-        cat << EOF
-upstream ${upstream_name} {
-    server ${ip}:80;
-    keepalive 32;
-}
-
-EOF
+        printf "upstream %s {\n    server %s:80;\n    keepalive 32;\n}\n\n" \
+            "$upstream_name" "$ip"
     done
 
     # HTTP server - ACME challenges + redirect
-    cat << EOF
-    # HTTP server - serve ACME challenges + conditional redirect to HTTPS
-    server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name ${all_server_names};
-
-    location /.well-known/acme-challenge/ {
-        root ${CERTBOT_ROOT};
+    {
+        printf '# HTTP server - serve ACME challenges + conditional redirect to HTTPS\n'
+        printf 'server {\n'
+        printf '    listen 80 default_server;\n'
+        printf '    listen [::]:80 default_server;\n'
+        printf '    server_name %s;\n\n' "$all_server_names"
+        printf '    location /.well-known/acme-challenge/ {\n'
+        printf '        root %s;\n' "$CERTBOT_ROOT"
+        printf '    }\n\n'
+        printf '    location / {\n'
     }
-
-    location / {
-    EOF
 
     for name in "${demo_names[@]}"; do
         # shellcheck source=/dev/null
         source "$ACTIVE_DIR/$name/config"
-        subdomain="${SUBDOMAIN:-$name}"
+        subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
         cert_path="/etc/letsencrypt/live/${subdomain}.iiab.io/fullchain.pem"
         upstream_name=$(echo "$name" | tr '-' '_')
 
         if [ -f "$cert_path" ]; then
-            cat << EOF
-        if (\$host = "${subdomain}.iiab.io") {
-            return 301 https://\$host\$request_uri;
-        }
-    EOF
+            printf '        if ($host = "%s.iiab.io") {\n' "$subdomain"
+            printf '            return 301 https://$host$request_uri;\n'
+            printf '        }\n'
         else
-            cat << EOF
-        if (\$host = "${subdomain}.iiab.io") {
-            proxy_pass http://${upstream_name};
-            proxy_set_header Host \$host;
-            proxy_set_header X-Real-IP \$remote_addr;
-            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto \$scheme;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade \$http_upgrade;
-            proxy_set_header Connection "upgrade";
-        }
-    EOF
+            printf '        if ($host = "%s.iiab.io") {\n' "$subdomain"
+            printf '            proxy_pass http://%s;\n' "$upstream_name"
+            printf '            proxy_set_header Host $host;\n'
+            printf '            proxy_set_header X-Real-IP $remote_addr;\n'
+            printf '            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
+            printf '            proxy_set_header X-Forwarded-Proto $scheme;\n'
+            printf '            proxy_http_version 1.1;\n'
+            printf '            proxy_set_header Upgrade $http_upgrade;\n'
+            printf '            proxy_set_header Connection "upgrade";\n'
+            printf '        }\n'
         fi
     done
 
-    cat << EOF
-
-        return 404;
+    {
+        printf '\n        return 404;\n'
+        printf '    }\n'
+        printf '}\n}\n\n'
+        printf '# HTTP catch-all for other *.iiab.io\n'
+        printf 'server {\n'
+        printf '    listen 80;\n'
+        printf '    listen [::]:80;\n'
+        printf '    server_name *.iiab.io;\n\n'
+        printf '    location /.well-known/acme-challenge/ {\n'
+        printf '        root %s;\n' "$CERTBOT_ROOT"
+        printf '    }\n\n'
+        printf '    location / {\n'
+        printf '        return 302 https://%s$request_uri;\n' "$fallback_domain"
+        printf '    }\n'
+        printf '}\n\n'
     }
-    }
-
-    # HTTP catch-all for other *.iiab.io
-    server {
-    listen 80;
-    listen [::]:80;
-    server_name *.iiab.io;
-
-    location /.well-known/acme-challenge/ {
-        root ${CERTBOT_ROOT};
-    }
-
-    location / {
-        return 302 https://${fallback_domain}\$request_uri;
-    }
-    }
-
-    EOF
 
     # HTTPS server blocks for each demo
     for name in "${demo_names[@]}"; do
         # shellcheck source=/dev/null
         source "$ACTIVE_DIR/$name/config"
-        subdomain="${SUBDOMAIN:-$name}"
+        subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
         upstream_name=$(echo "$name" | tr '-' '_')
         cert_path="/etc/letsencrypt/live/${subdomain}.iiab.io/fullchain.pem"
 
         if [ -f "$cert_path" ]; then
-            cat << EOF
-# HTTPS server for ${subdomain}.iiab.io
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${subdomain}.iiab.io;
-
-    ssl_certificate ${cert_path};
-    ssl_certificate_key /etc/letsencrypt/live/${subdomain}.iiab.io/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_stapling on;
-    ssl_stapling_verify on;
-
-    location / {
-        proxy_pass http://${upstream_name};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$host;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-
-EOF
+            printf '# HTTPS server for %s.iiab.io\n' "$subdomain"
+            printf 'server {\n'
+            printf '    listen 443 ssl http2;\n'
+            printf '    listen [::]:443 ssl http2;\n'
+            printf '    server_name %s.iiab.io;\n\n' "$subdomain"
+            printf '    ssl_certificate %s;\n' "$cert_path"
+            printf '    ssl_certificate_key /etc/letsencrypt/live/%s.iiab.io/privkey.pem;\n' "$subdomain"
+            printf '    ssl_protocols TLSv1.2 TLSv1.3;\n'
+            printf '    ssl_stapling on;\n'
+            printf '    ssl_stapling_verify on;\n\n'
+            printf '    location / {\n'
+            printf '        proxy_pass http://%s;\n' "$upstream_name"
+            printf '        proxy_set_header Host $host;\n'
+            printf '        proxy_set_header X-Real-IP $remote_addr;\n'
+            printf '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n'
+            printf '        proxy_set_header X-Forwarded-Proto $scheme;\n'
+            printf '        proxy_set_header X-Forwarded-Host $host;\n'
+            printf '        proxy_http_version 1.1;\n'
+            printf '        proxy_set_header Upgrade $http_upgrade;\n'
+            printf '        proxy_set_header Connection "upgrade";\n'
+            printf '    }\n'
+            printf '}\n\n'
         else
-            cat << EOF
-# HTTPS server for ${subdomain}.iiab.io (DISABLED - certificate not found)
-# Run 'democtl certbot' to obtain certificates
-EOF
+            printf '# HTTPS server for %s.iiab.io (DISABLED - certificate not found)\n' "$subdomain"
+            printf "# Run 'democtl certbot' to obtain certificates\n"
         fi
     done
 
     # Fallback server
     fallback_cert="/etc/letsencrypt/live/${fallback_domain}/fullchain.pem"
     if [ -f "$fallback_cert" ]; then
-        cat << EOF
-# Catch-all for any other *.iiab.io subdomains
-server {
-    listen 443 ssl http2 default_server;
-    listen [::]:443 ssl http2 default_server;
-    server_name *.iiab.io;
-
-    ssl_certificate ${fallback_cert};
-    ssl_certificate_key /etc/letsencrypt/live/${fallback_domain}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    return 302 https://${fallback_domain}\$request_uri;
-}
-EOF
+        printf '# Catch-all for any other *.iiab.io subdomains\n'
+        printf 'server {\n'
+        printf '    listen 443 ssl http2 default_server;\n'
+        printf '    listen [::]:443 ssl http2 default_server;\n'
+        printf '    server_name *.iiab.io;\n\n'
+        printf '    ssl_certificate %s;\n' "$fallback_cert"
+        printf '    ssl_certificate_key /etc/letsencrypt/live/%s.iiab.io/privkey.pem;\n' "$fallback_domain"
+        printf '    ssl_protocols TLSv1.2 TLSv1.3;\n\n'
+        printf '    return 302 https://%s$request_uri;\n' "$fallback_domain"
+        printf '}\n'
     fi
 }
 

@@ -31,16 +31,67 @@ LOCK_FD=200
 acquire_lock() {
     local timeout="${1:--1}"  # -1 = wait forever, 0 = non-blocking
     eval "exec $LOCK_FD>$LOCK_FILE"
+
+    # Stale lock detection: check if the lock-holding process is alive
+    _try_clean_stale_lock() {
+        if [ -f "$LOCK_FILE" ]; then
+            # Try to read PID from lock file (written by previous holder)
+            local stale_pid=""
+            stale_pid=$(cat "$LOCK_FILE.pid" 2>/dev/null || echo "")
+            if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+                echo "Warning: Lock held by dead PID $stale_pid, removing stale lock" >&2
+                rm -f "$LOCK_FILE" "$LOCK_FILE.pid"
+                return 0  # Caller should retry
+            fi
+        fi
+        return 1  # No stale lock or process still alive
+    }
+
     if [ "$timeout" = "0" ]; then
         if ! flock -n "$LOCK_FD"; then
-            echo "Error: another democtl operation is in progress (lock held)." >&2
-            echo "  If no other democtl is running, remove stale lock:" >&2
-            echo "    rm -f $LOCK_FILE" >&2
-            return 1
+            # Attempt stale lock cleanup
+            if _try_clean_stale_lock; then
+                eval "exec $LOCK_FD>$LOCK_FILE"
+                if ! flock -n "$LOCK_FD"; then
+                    echo "Error: another democtl operation is in progress (lock held)." >&2
+                    echo "  If no other democtl is running, remove stale lock:" >&2
+                    echo "    rm -f $LOCK_FILE" >&2
+                    return 1
+                fi
+            else
+                echo "Error: another democtl operation is in progress (lock held)." >&2
+                echo "  If no other democtl is running, remove stale lock:" >&2
+                echo "    rm -f $LOCK_FILE $LOCK_FILE.pid" >&2
+                return 1
+            fi
         fi
     else
-        flock "$LOCK_FD"
+        # For blocking mode, periodically check for stale locks
+        if [ "$timeout" = "-1" ]; then
+            local retries=0
+            while ! flock -n "$LOCK_FD" 2>/dev/null; do
+                if _try_clean_stale_lock; then
+                    eval "exec $LOCK_FD>$LOCK_FILE"
+                    if flock -n "$LOCK_FD"; then
+                        break
+                    fi
+                fi
+                retries=$((retries + 1))
+                if [ "$retries" -ge 60 ]; then
+                    echo "Error: Could not acquire lock after 5 minutes" >&2
+                    echo "  If no other democtl is running, remove stale lock:" >&2
+                    echo "    rm -f $LOCK_FILE $LOCK_FILE.pid" >&2
+                    return 1
+                fi
+                sleep 5
+            done
+        else
+            flock -w "$timeout" "$LOCK_FD"
+        fi
     fi
+
+    # Record our PID for stale lock detection by subsequent callers
+    echo $$ > "$LOCK_FILE.pid"
 }
 
 release_lock() {
@@ -131,6 +182,38 @@ log_demo() {
     local name="$1"
     shift
     echo "[$(date -u +%H:%M:%S)] [$name] $*"
+}
+
+# Validate that a script exists, is executable, and has no syntax errors
+_validate_script() {
+    local script="$1"
+    if [ ! -f "$script" ]; then
+        echo "Error: Script not found: $script" >&2
+        return 1
+    fi
+    if [ ! -x "$script" ]; then
+        echo "Error: Script not executable: $script" >&2
+        return 1
+    fi
+    if ! bash -n "$script" 2>/dev/null; then
+        echo "Error: Script has syntax errors: $script" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Sanitize a name into a valid nginx server_name / upstream-safe identifier
+sanitize_subdomain() {
+    local raw="$1"
+    local cleaned
+    cleaned=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+    cleaned="${cleaned#-}"
+    cleaned="${cleaned%-}"
+    if [ -z "$cleaned" ]; then
+        echo "demo"
+    else
+        echo "$cleaned"
+    fi
 }
 
 ###############################################################################
@@ -279,6 +362,29 @@ cmd_add() {
         return 1
     fi
 
+    # Validate demo name: only letters, numbers, hyphens, underscores; max 64 chars
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "Error: Demo name '$name' contains invalid characters." >&2
+        echo "  Only letters, numbers, hyphens, and underscores are allowed." >&2
+        return 1
+    fi
+    if [[ ${#name} -gt 64 ]]; then
+        echo "Error: Demo name must be 64 characters or less (got ${#name})." >&2
+        return 1
+    fi
+
+    # Validate size is a positive integer and reasonable (>= 1000 MB)
+    if [[ ! "$size_mb" =~ ^[0-9]+$ ]] || [ "$size_mb" -lt 1000 ]; then
+        echo "Error: --size must be a positive integer >= 1000 MB (got: $size_mb)." >&2
+        return 1
+    fi
+
+    # Validate local-vars path exists early (before acquiring lock)
+    if [ -n "$local_vars" ] && [[ "$local_vars" == /* ]] && [ ! -f "$local_vars" ]; then
+        echo "Error: local-vars file not found: $local_vars" >&2
+        return 1
+    fi
+
     if [ -z "$edition" ]; then
         edition="$name"
     fi
@@ -343,13 +449,50 @@ EOF
     if $foreground; then
         build_demo "$name"
     else
-        # Fork build in background
+        # Fork build in background with heartbeat monitoring
         (
             build_demo "$name" >> "$demo_dir/build.log" 2>&1
         ) &
         local pid=$!
         echo "$pid" > "$demo_dir/build.pid"
-        echo "Build started in background (PID: $pid)"
+
+        # Fork heartbeat watchdog
+        (
+            local last_size=0
+            local stale_count=0
+            local max_stale=6  # 6 checks × 5min = 30 min max staleness
+            while kill -0 "$pid" 2>/dev/null; do
+                sleep 300  # Check every 5 minutes
+                if [ -f "$demo_dir/build.log" ]; then
+                    local current_size
+                    current_size=$(stat -c%s "$demo_dir/build.log" 2>/dev/null || echo 0)
+                    if [ "$current_size" -eq "$last_size" ]; then
+                        stale_count=$((stale_count + 1))
+                        if [ "$stale_count" -ge "$max_stale" ]; then
+                            echo "[$(date -u +%H:%M:%S)] [watchdog] Build appears hung (no log output in $(( stale_count * 5 )) min). Killing PID $pid" >> "$demo_dir/build.log"
+                            kill -TERM "$pid" 2>/dev/null
+                            sleep 10
+                            kill -9 "$pid" 2>/dev/null || true
+                            echo "failed" > "$demo_dir/status"
+                            # Rollback resources
+                            acquire_lock 0 && {
+                                free_resources "$name"
+                                release_lock
+                            } || true
+                            rm -f "$demo_dir/build.pid"
+                            break
+                        fi
+                    else
+                        last_size="$current_size"
+                        stale_count=0
+                    fi
+                fi
+            done
+        ) &
+        local watchdog_pid=$!
+        echo "$watchdog_pid" > "$demo_dir/build.watchdog"
+
+        echo "Build started in background (PID: $pid, watchdog: $watchdog_pid)"
         echo "  democtl status $name   # Check progress"
         echo "  democtl logs $name     # Follow build log"
     fi
@@ -385,15 +528,33 @@ build_demo() {
     if [ ! -d "$NSPAWN_DIR" ]; then
         log_demo "$name" "Error: nspawn-loop not found at $NSPAWN_DIR"
         echo "failed" > "$demo_dir/status"
+        _rollback_build_resources "$name"
         return 1
     fi
 
     # Build the container image using build-container.sh
     local build_script="${SCRIPT_DIR}/build-container.sh"
-    if [ ! -x "$build_script" ]; then
-        log_demo "$name" "Error: build-container.sh not found at $build_script"
+
+    # Validate all external scripts before use
+    if ! _validate_script "$build_script"; then
+        log_demo "$name" "Error: build-container.sh validation failed"
         echo "failed" > "$demo_dir/status"
+        _rollback_build_resources "$name"
         return 1
+    fi
+
+    # Resource pre-flight (re-check under lock — resources may have changed since add)
+    if ! acquire_lock 0; then
+        log_demo "$name" "Warning: Could not acquire lock for resource re-check"
+    else
+        if ! check_resources "$name" "$IMAGE_SIZE_MB" "$RAM_IMAGE"; then
+            log_demo "$name" "Resources no longer available, aborting build"
+            release_lock
+            echo "failed" > "$demo_dir/status"
+            _rollback_build_resources "$name"
+            return 1
+        fi
+        release_lock
     fi
 
     local build_args=(
@@ -418,21 +579,20 @@ build_demo() {
     log_demo "$name" "Building: edition=$EDITION branch=$IIAB_BRANCH volatile=$VOLATILE ram_image=$RAM_IMAGE"
     log_demo "$name" "This will take 30-60 minutes..."
 
-    if bash "$build_script" "${build_args[@]}"; then
-        log_demo "$name" "Build complete!"
-    else
+    if ! bash "$build_script" "${build_args[@]}"; then
         log_demo "$name" "Build FAILED!"
         echo "failed" > "$demo_dir/status"
+        _rollback_build_resources "$name"
         return 1
     fi
 
     # Load RAM image if needed
     if [ "$RAM_IMAGE" = "true" ] && [ -f "$SCRIPT_DIR/ramfs-setup.sh" ]; then
         log_demo "$name" "Loading image into RAM..."
-        if bash "$SCRIPT_DIR/ramfs-setup.sh" load "$name" >> "$demo_dir/build.log" 2>&1; then
-            log_demo "$name" "Image loaded into RAM"
-        else
+        if ! bash "$SCRIPT_DIR/ramfs-setup.sh" load "$name" >> "$demo_dir/build.log" 2>&1; then
             log_demo "$name" "Warning: Failed to load image into RAM, using disk"
+        else
+            log_demo "$name" "Image loaded into RAM"
         fi
     fi
 
@@ -460,6 +620,7 @@ build_demo() {
     if [ ! -f "$image_path" ]; then
         log_demo "$name" "Error: Image not found at $image_path"
         echo "failed" > "$demo_dir/status"
+        _rollback_build_resources "$name"
         return 1
     fi
 
@@ -474,7 +635,25 @@ build_demo() {
     fi
 
     echo "running" > "$demo_dir/status"
+    rm -f "$demo_dir/build.pid"  # Build complete, clear PID
     log_demo "$name" "Demo is now running!"
+}
+
+# Rollback resources when a build fails
+_rollback_build_resources() {
+    local name="$1"
+    local demo_dir="$ACTIVE_DIR/$name"
+
+    # Acquire lock to safely modify resource counters
+    if acquire_lock 0; then
+        free_resources "$name"
+        release_lock
+    else
+        log_demo "$name" "Warning: Could not acquire lock to rollback resources"
+    fi
+
+    # Clean up build PID file
+    rm -f "$demo_dir/build.pid"
 }
 
 ###############################################################################
@@ -496,7 +675,13 @@ cmd_remove() {
     systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null || true
     systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null || true
 
-    # Kill any running build
+    # Kill any running build and watchdog
+    if [ -f "$demo_dir/build.watchdog" ]; then
+        local wpid
+        wpid=$(cat "$demo_dir/build.watchdog")
+        kill "$wpid" 2>/dev/null || true
+        rm -f "$demo_dir/build.watchdog"
+    fi
     if [ -f "$demo_dir/build.pid" ]; then
         local pid
         pid=$(cat "$demo_dir/build.pid")
@@ -668,6 +853,36 @@ cmd_status() {
         systemctl status "systemd-nspawn@${name}.service" --no-pager || true
     fi
 
+    # Show certificate expiry info
+    local subdomain
+    subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}" 2>/dev/null || echo "${SUBDOMAIN:-$name}")
+    local cert_path="/etc/letsencrypt/live/${subdomain}.iiab.io/fullchain.pem"
+    if [ -f "$cert_path" ]; then
+        local cert_expiry
+        cert_expiry=$(openssl x509 -enddate -noout -in "$cert_path" 2>/dev/null | cut -d= -f2 || echo "")
+        if [ -n "$cert_expiry" ]; then
+            local expiry_epoch now days_left
+            expiry_epoch=$(date -d "$cert_expiry" +%s 2>/dev/null || echo 0)
+            now=$(date +%s)
+            if [ "$expiry_epoch" -gt 0 ]; then
+                days_left=$(( (expiry_epoch - now) / 86400 ))
+                echo ""
+                echo "Certificate: $cert_path"
+                echo "  Expires: $cert_expiry"
+                if [ "$days_left" -lt 0 ]; then
+                    echo "  Status: EXPIRED ($(( -days_left )) days ago)"
+                elif [ "$days_left" -lt 7 ]; then
+                    echo "  Status: WARNING — expires in $days_left days"
+                else
+                    echo "  Status: OK ($days_left days remaining)"
+                fi
+            fi
+        fi
+    elif [ "$status" = "running" ]; then
+        echo ""
+        echo "Certificate: not obtained (run: democtl certbot)"
+    fi
+
     if [ "$status" = "building" ] && [ -f "$demo_dir/build.pid" ]; then
         local pid
         pid=$(cat "$demo_dir/build.pid")
@@ -677,6 +892,30 @@ cmd_status() {
             echo "Build is still running..."
         else
             echo "Build process has exited (check log)"
+        fi
+
+        # Show watchdog info
+        if [ -f "$demo_dir/build.watchdog" ]; then
+            local wpid
+            wpid=$(cat "$demo_dir/build.watchdog")
+            if kill -0 "$wpid" 2>/dev/null; then
+                echo "Watchdog PID: $wpid (monitoring)"
+            else
+                echo "Watchdog PID: $wpid (exited)"
+            fi
+        fi
+
+        # Check for hung build (no log output in 30+ minutes)
+        if [ -f "$demo_dir/build.log" ]; then
+            local log_mtime now age_sec
+            log_mtime=$(stat -c%Y "$demo_dir/build.log" 2>/dev/null || echo 0)
+            now=$(date +%s)
+            age_sec=$(( now - log_mtime ))
+            if [ "$age_sec" -gt 1800 ]; then
+                echo ""
+                echo "WARNING: Build log hasn't been updated for $(( age_sec / 60 )) minutes."
+                echo "  The build may be hung. Consider: democtl remove $name"
+            fi
         fi
     fi
 }
@@ -810,6 +1049,92 @@ cmd_apply() {
 }
 
 ###############################################################################
+# democtl reconcile — fix drift in allocated resource counters
+###############################################################################
+cmd_reconcile() {
+    ensure_root "$@"
+    ensure_state_dirs
+
+    echo "=== Reconciling resource counters ==="
+
+    acquire_lock 0 || {
+        echo "Error: another operation is in progress" >&2
+        return 1
+    }
+    trap release_lock EXIT
+
+    load_resources
+
+    local old_disk_allocated="$DISK_ALLOCATED"
+    local old_ram_allocated="$RAM_ALLOCATED"
+    local new_disk_allocated=0
+    local new_ram_allocated=0
+    local reconciled=0
+
+    for demo_dir in "$ACTIVE_DIR"/*/; do
+        [ -d "$demo_dir" ] || continue
+        local name
+        name=$(basename "$demo_dir")
+
+        if [ ! -f "$demo_dir/config" ]; then
+            echo "  Warning: $name has no config file, skipping"
+            continue
+        fi
+
+        # shellcheck source=/dev/null
+        source "$demo_dir/config"
+
+        local size_mb=0
+        if [ -n "${IMAGE_SIZE_MB:-}" ]; then
+            size_mb="$IMAGE_SIZE_MB"
+        fi
+
+        if [ "${RAM_IMAGE:-false}" = "true" ]; then
+            new_ram_allocated=$(( new_ram_allocated + size_mb ))
+        else
+            new_disk_allocated=$(( new_disk_allocated + size_mb ))
+        fi
+        reconciled=$((reconciled + 1))
+    done
+
+    DISK_ALLOCATED="$new_disk_allocated"
+    RAM_ALLOCATED="$new_ram_allocated"
+    save_resources
+
+    release_lock
+    trap - EXIT
+
+    echo "Reconciled $reconciled demo(s)."
+    echo "  Disk allocated: ${old_disk_allocated}MB → ${new_disk_allocated}MB"
+    echo "  RAM allocated:  ${old_ram_allocated}MB → ${new_ram_allocated}MB"
+
+    # Check for ghost IPs (IPs assigned but no running container)
+    echo ""
+    echo "=== Checking for ghost IP assignments ==="
+    local ghosts=0
+    for demo_dir in "$ACTIVE_DIR"/*/; do
+        [ -d "$demo_dir" ] || continue
+        local name
+        name=$(basename "$demo_dir")
+        local ip=""
+        if [ -f "$demo_dir/ip" ]; then
+            ip=$(cat "$demo_dir/ip")
+        fi
+        local status=""
+        if [ -f "$demo_dir/status" ]; then
+            status=$(cat "$demo_dir/status")
+        fi
+        if [ "$status" != "running" ] && [ -n "$ip" ]; then
+            echo "  Ghost: $name has IP $ip but status is '$status'"
+            ghosts=$((ghosts + 1))
+        fi
+    done
+    if [ "$ghosts" -eq 0 ]; then
+        echo "  No ghost IP assignments found."
+    fi
+}
+
+###############################################################################
 # democtl reload — regenerate nginx
 ###############################################################################
 cmd_reload() {
@@ -873,6 +1198,7 @@ Commands:
   reload                        Regenerate nginx config from active demos
   certbot                       Obtain/renew Let's Encrypt certificates
   ramfs <action> [name]         Manage RAM-loaded images (load/unload/status/cleanup)
+  reconcile                     Fix resource counter drift and check ghost IPs
 
 Add flags:
   --edition <edition>       IIAB edition: small, medium, large (default: name)
@@ -918,6 +1244,7 @@ main() {
         reload)    cmd_reload "$@" ;;
         certbot)   cmd_certbot "$@" ;;
         ramfs)     cmd_ramfs "$@" ;;
+        reconcile) cmd_reconcile "$@" ;;
         help|--help|-h) cmd_help ;;
         *)
             echo "Error: Unknown command: $cmd" >&2

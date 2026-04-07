@@ -94,6 +94,14 @@ unload_image() {
 
     acquire_ramfs_lock
 
+    # Safety: don't unload if container is still running from this image
+    if systemctl is-active --quiet "systemd-nspawn@${name}.service"; then
+        echo "Error: Demo '$name' is still running. Stop it first:" >&2
+        echo "  systemctl stop systemd-nspawn@${name}.service" >&2
+        echo "  or: democtl remove $name" >&2
+        return 1
+    fi
+
     if [ -f "$dest" ]; then
         echo "Removing $dest from RAM..."
         rm -f "$dest"
@@ -102,13 +110,25 @@ unload_image() {
         echo "Image not in RAM: ${name}"
     fi
 
-    # If no images remain, unmount the tmpfs
+    # If no images remain, unmount the tmpfs and clean up symlinks
     local remaining
-    remaining=$(find "$RAMFS_ROOT" -name '*.raw' 2>/dev/null | wc -l)
+    remaining=$(find "$RAMFS_ROOT" -name '*.raw' -type f 2>/dev/null | wc -l)
     if [ "$remaining" -eq 0 ] && mountpoint -q "$RAMFS_ROOT" 2>/dev/null; then
         echo "No images in RAM, unmounting tmpfs..."
         umount "$RAMFS_ROOT"
         rmdir "$RAMFS_ROOT"
+
+        # Clean up symlinks in /var/lib/machines that pointed to RAM images
+        echo "Cleaning up dangling symlinks in /var/lib/machines/..."
+        for link in /var/lib/machines/*.raw; do
+            [ -L "$link" ] || continue
+            local target
+            target=$(readlink -f "$link" 2>/dev/null || echo "")
+            if [[ "$target" == /run/iiab-ramfs/* ]] && [ ! -f "$target" ]; then
+                echo "  Removing dangling symlink: $link"
+                rm -f "$link"
+            fi
+        done
     fi
 }
 
@@ -137,6 +157,18 @@ cleanup() {
         echo "Unmounting RAMFS and removing all images..."
         umount "$RAMFS_ROOT"
         rmdir "$RAMFS_ROOT"
+
+        # Clean up symlinks in /var/lib/machines that pointed to RAM images
+        echo "Cleaning up dangling symlinks in /var/lib/machines/..."
+        for link in /var/lib/machines/*.raw; do
+            [ -L "$link" ] || continue
+            local target
+            target=$(readlink -f "$link" 2>/dev/null || echo "")
+            if [[ "$target" == /run/iiab-ramfs/* ]] && [ ! -f "$target" ]; then
+                echo "  Removing dangling symlink: $link"
+                rm -f "$link"
+            fi
+        done
         echo "Cleanup complete"
     else
         echo "RAMFS not mounted, nothing to clean"

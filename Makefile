@@ -6,7 +6,7 @@
         remove-small remove-medium remove-large \
         rebuild-small rebuild-medium rebuild-large \
         ramfs-load ramfs-unload ramfs-status ramfs-cleanup \
-        reload certbot stop clean
+        reload certbot stop clean reconcile
 
 # Default target
 help:
@@ -92,6 +92,10 @@ ramfs-status:
 
 ramfs-cleanup:
 	bash democtl ramfs cleanup
+
+# Reconcile resource counters
+reconcile:
+	bash democtl reconcile
 
 # Stop all running demos
 stop:
