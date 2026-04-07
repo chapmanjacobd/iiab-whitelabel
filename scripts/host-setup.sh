@@ -227,12 +227,7 @@ ensure_dirs /var/lib/machines /var/www/certbot
 echo ""
 echo "=== Testing nginx configuration ==="
 
-if nginx -t 2>/dev/null; then
-    echo "nginx initial config test passed"
-else
-    echo "Warning: nginx initial config test failed" >&2
-    nginx -t >&2 || true
-fi
+nginx_reload
 
 echo ""
 echo "=== Host setup complete! ==="

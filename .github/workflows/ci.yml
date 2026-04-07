@@ -47,14 +47,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: base-image.raw
-          key: debian-13-base-image
+          key: debian-13-base-image-v1
+
+      - name: Download base image
+        if: steps.cache-base-image.outputs.cache-hit != 'true'
+        run: |
+          curl -fL -o base-image.raw \
+            "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw"
 
       - name: Prep base image
         run: |
           sudo mkdir -p /var/lib/iiab-demos
-          if [ -f base-image.raw ]; then
-            sudo cp base-image.raw /var/lib/iiab-demos/debian-13-generic-amd64.raw
-          fi
+          sudo cp base-image.raw /var/lib/iiab-demos/debian-13-generic-amd64.raw
 
       - name: Initialize host
         run: sudo ./democtl init
@@ -66,17 +70,9 @@ jobs:
             --local-vars vars/local_vars_unittest.yml \
             --fg --repo github.com/chapmanjacobd/iiab --branch rpi_image/genericvm
 
-      - name: Save base image for cache
-        if: steps.cache-base-image.outputs.cache-hit != 'true'
-        run: |
-          if [ -f /var/lib/iiab-demos/debian-13-generic-amd64.raw ]; then
-            sudo cp /var/lib/iiab-demos/debian-13-generic-amd64.raw base-image.raw
-            sudo chown runner:runner base-image.raw
-          fi
-
       - name: Verify build
         run: |
           sudo ./democtl list
           sudo ./democtl status unittest
-          # Check if the image exists
-          ls -lh /var/lib/machines/unittest.raw
+          # Check if the image exists (dereference symlink)
+          sudo ls -lhL /var/lib/machines/unittest.raw

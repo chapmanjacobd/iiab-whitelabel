@@ -256,6 +256,9 @@ fi
 # Set hostname
 echo "$NAME" > "$MOUNT_DIR/etc/hostname"
 
+# Set default target to multi-user (no GUI needed in containers)
+ln -sf /usr/lib/systemd/system/multi-user.target "$MOUNT_DIR/etc/systemd/system/default.target"
+
 # Configure container IP via systemd-networkd inside the image
 # The ve-* interface is created by nspawn --network-veth on the host side
 mkdir -p "$MOUNT_DIR/etc/systemd/network"
@@ -277,20 +280,11 @@ iiab_admin_user_install: False
 EOF
 
 ###############################################################################
-# Step 3: Bootstrap container (SKIPPING IIAB install for fast iteration)
+# Step 3: Run IIAB installer inside nspawn
 ###############################################################################
 echo ""
-echo "=== Step 3: Bootstrapping container (IIAB install SKIPPED) ==="
+echo "=== Step 3: Running IIAB installer (this takes 30-60 minutes) ==="
 
-# Minimal setup — no IIAB install
-systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force
-rm -f "$MOUNT_DIR/etc/resolv.conf"
-echo "nameserver 8.8.8.8" > "$MOUNT_DIR/etc/resolv.conf"
-
-echo "=== Bootstrap complete (no IIAB) ==="
-
-# SKIP: Full IIAB install
-: <<'DISABLED_IIAB_INSTALL'
 # Network setup
 systemctl is-active --quiet systemd-networkd || systemctl start systemd-networkd
 systemctl is-active --quiet systemd-resolved || systemctl start systemd-resolved
@@ -353,7 +347,6 @@ EXPECT_EOF
 
 echo ""
 echo "=== IIAB install complete ==="
-DISABLED_IIAB_INSTALL
 
 ###############################################################################
 # Step 4: Shrink the image
