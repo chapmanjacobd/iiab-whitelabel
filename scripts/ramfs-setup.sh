@@ -48,12 +48,11 @@ load_image() {
     # Create RAMFS root if needed
     if ! mountpoint -q "$RAMFS_ROOT" 2>/dev/null; then
         mkdir -p "$RAMFS_ROOT"
-        # Calculate size needed for this image + some buffer
         local img_mb
         img_mb=$(du -m "$src" | cut -f1)
-        local size_mb=$(( (img_mb * 11) / 10 )) # 10% headroom
-        echo "Mounting tmpfs at $RAMFS_ROOT (${size_mb}MB)..."
-        mount -t tmpfs -o "size=${size_mb}M,mode=0755" tmpfs "$RAMFS_ROOT"
+        # Use exact image size for the initial mount
+        echo "Mounting tmpfs at $RAMFS_ROOT (${img_mb}MB)..."
+        mount -t tmpfs -o "size=${img_mb}M,mode=0755" tmpfs "$RAMFS_ROOT"
     fi
 
     if [ -f "$dest" ]; then
@@ -68,6 +67,7 @@ load_image() {
     # Check available RAM
     local avail_mb
     avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+    # Keeping the 512MB RAM safety buffer as requested
     if [ "$img_size_mb" -gt "$((avail_mb - 512))" ]; then
         echo "Error: Not enough RAM available (${avail_mb}MB, need ~${img_size_mb}MB)" >&2
         exit 1
@@ -78,7 +78,7 @@ load_image() {
     current_size=$(df -m "$RAMFS_ROOT" | awk 'NR==2 {print $2}')
     local current_used
     current_used=$(df -m "$RAMFS_ROOT" | awk 'NR==2 {print $3}')
-    local needed=$(( current_used + img_size_mb + 100 )) # Small buffer
+    local needed=$(( current_used + img_size_mb ))
     if [ "$needed" -gt "$current_size" ]; then
         mount -o "remount,size=${needed}M" "$RAMFS_ROOT"
     fi

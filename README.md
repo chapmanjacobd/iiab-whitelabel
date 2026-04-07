@@ -196,9 +196,9 @@ Two independent toggles:
 
 `democtl add` checks resources **before** starting a build:
 
-- **RAM**: All demos build in tmpfs — verifies ≥ size + 512MB available RAM
-- **Disk (non-ram-image only)**: Also verifies ≥ size + 500MB free on `/var/lib/machines` for the final image
-- **Disk (ram-image)**: Only needs ~1GB for the shared base image
+- **RAM**: All demos build in tmpfs — verifies ≥ size + 512MB available RAM (for container runtime)
+- **Disk (non-ram-image only)**: Verifies ≥ size free on `/var/lib/machines` for the final image
+- **Disk (ram-image)**: Only needs ~1GB for the shared base image (one-time download)
 
 Insufficient resources print what's needed vs available and abort cleanly. Allocations are tracked per-demo and freed on `remove`.
 

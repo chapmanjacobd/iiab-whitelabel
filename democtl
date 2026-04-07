@@ -10,11 +10,15 @@ STATE_DIR="/var/lib/iiab-demos"
 ACTIVE_DIR="$STATE_DIR/active"
 RESOURCE_FILE="$STATE_DIR/resources"
 DEMO_SUBNET="10.0.3.0/24"
+# shellcheck disable=SC2034  # Used for documentation/reference
 DEMO_GW="10.0.3.1"
 SUBNET_BASE="10.0.3"
+# shellcheck disable=SC2034  # Reserved for future use / external scripts
 BRIDGE="iiab-br0"
-DISK_BASE=500  # MB base image + OS overhead buffer
-RAM_BUFFER=512    # Extra MB buffer per build (RAM or ram-image)
+
+# Resource allocation constants
+RAM_BUFFER=512    # Extra MB buffer per build (RAM or ram-image) for container runtime
+DISK_BASE=0       # No extra disk headroom; use requested size exactly
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
 
@@ -48,7 +52,7 @@ acquire_lock() {
                 if [ -n "$cmdline" ] && ! echo "$cmdline" | grep -q 'democtl'; then
                     # Process exists but is NOT democtl — likely PID reuse, treat as stale
                     local lock_age
-                    lock_age=$(( $(date +%s) - $(stat -c%Y "$LOCK_FILE" 2>/dev/null || echo "$(date +%s)") ))
+                    lock_age=$(( $(date +%s) - $(stat -c%Y "$LOCK_FILE" 2>/dev/null || date +%s) ))
                     if [ "$lock_age" -gt 300 ]; then  # Only override if lock is > 5 min old
                         echo "Warning: Lock held by non-democtl PID $stale_pid (age: ${lock_age}s), removing stale lock" >&2
                         rm -f "$LOCK_FILE" "$LOCK_FILE.pid"
@@ -142,10 +146,10 @@ load_resources() {
 
 save_resources() {
     cat > "$RESOURCE_FILE" << EOF
-DISK_TOTAL=${DISK_TOTAL}
-DISK_ALLOCATED=${DISK_ALLOCATED}
-RAM_TOTAL=${RAM_TOTAL}
-RAM_ALLOCATED=${RAM_ALLOCATED}
+DISK_TOTAL=${DISK_TOTAL:-0}
+DISK_ALLOCATED=${DISK_ALLOCATED:-0}
+RAM_TOTAL=${RAM_TOTAL:-0}
+RAM_ALLOCATED=${RAM_ALLOCATED:-0}
 EOF
 }
 
@@ -159,8 +163,12 @@ load_demo_config() {
     fi
     # shellcheck source=/dev/null
     source "$dir/config"
+    # These variables are set for external use / reference
+    # shellcheck disable=SC2034
     DEMO_NAME="$name"
+    # shellcheck disable=SC2034
     DEMO_IP=$(cat "$dir/ip")
+    # shellcheck disable=SC2034
     DEMO_STATUS=$(cat "$dir/status" 2>/dev/null || echo "unknown")
 }
 
@@ -509,7 +517,9 @@ EOF
                             echo "[$(date -u +%H:%M:%S)] [watchdog] Build appears hung (no log output in $(( stale_count * 5 )) min). Killing PID $pid" >> "$demo_dir/build.log"
                             kill -TERM "$pid" 2>/dev/null
                             sleep 10
-                            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+                            if kill -0 "$pid" 2>/dev/null; then
+                                kill -9 "$pid" 2>/dev/null || true
+                            fi
                             sleep 5
                             # Wait for build process to actually exit
                             local wait_count=0
@@ -519,10 +529,10 @@ EOF
                             done
                             echo "failed" > "$demo_dir/status"
                             # Rollback resources
-                            acquire_lock 0 && {
+                            if acquire_lock 0; then
                                 free_resources "$name"
                                 release_lock
-                            } || true
+                            fi
                             rm -f "$demo_dir/build.pid" "$demo_dir/build.watchdog"
                             break
                         fi
@@ -576,6 +586,7 @@ build_demo() {
     if ! acquire_lock 0; then
         log_demo "$name" "Warning: Could not acquire lock for resource re-check"
     else
+        # shellcheck disable=SC2153  # Variables are set via source from config file
         if ! check_resources "$name" "$IMAGE_SIZE_MB" "$RAM_IMAGE"; then
             log_demo "$name" "Resources no longer available, aborting build"
             release_lock
@@ -586,6 +597,7 @@ build_demo() {
         release_lock
     fi
 
+    # shellcheck disable=SC2153
     local build_args=(
         "--name" "$name"
         "--edition" "$EDITION"

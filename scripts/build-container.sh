@@ -73,6 +73,24 @@ echo "Build on disk: $BUILD_ON_DISK"
 echo "Local vars:   ${LOCAL_VARS:-(none)}"
 
 ###############################################################################
+# Resolve base image source
+###############################################################################
+BASE_IMAGE=""
+if [ -n "$IMAGE_SOURCE" ] && [ -f "$IMAGE_SOURCE" ]; then
+    BASE_IMAGE="$IMAGE_SOURCE"
+elif [ -f "/run/iiab-ramfs/base-image.raw" ]; then
+    BASE_IMAGE="/run/iiab-ramfs/base-image.raw"
+elif [ -f "/var/lib/iiab-demos/debian-13-generic-amd64.raw" ]; then
+    BASE_IMAGE="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
+else
+    echo "Downloading Debian 13 generic amd64 image..."
+    mkdir -p /var/lib/iiab-demos
+    curl -fL -o /var/lib/iiab-demos/debian-13-generic-amd64.raw \
+        "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw"
+    BASE_IMAGE="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
+fi
+
+###############################################################################
 # Build working directory (tmpfs by default)
 ###############################################################################
 if $BUILD_ON_DISK; then
@@ -85,9 +103,8 @@ WORK_IMG="${BUILD_DIR}/work.img"
 
 if ! $BUILD_ON_DISK && ! mountpoint -q "${BUILD_DIR%/*}" 2>/dev/null; then
     mkdir -p "${BUILD_DIR%/*}"
-    ram_size=$(( SIZE_MB * 12 / 10 ))  # 20% headroom for overhead
-    echo "Mounting tmpfs at ${BUILD_DIR%/*} (${ram_size}MB)..."
-    mount -t tmpfs -o "size=${ram_size}M,mode=0755" tmpfs "${BUILD_DIR%/*}"
+    echo "Mounting tmpfs at ${BUILD_DIR%/*} (${SIZE_MB}MB)..."
+    mount -t tmpfs -o "size=${SIZE_MB}M,mode=0755" tmpfs "${BUILD_DIR%/*}"
 fi
 mkdir -p "$BUILD_DIR" "$MOUNT_DIR"
 
@@ -115,24 +132,6 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
-
-###############################################################################
-# Resolve base image source
-###############################################################################
-BASE_IMAGE=""
-if [ -n "$IMAGE_SOURCE" ] && [ -f "$IMAGE_SOURCE" ]; then
-    BASE_IMAGE="$IMAGE_SOURCE"
-elif [ -f "/run/iiab-ramfs/base-image.raw" ]; then
-    BASE_IMAGE="/run/iiab-ramfs/base-image.raw"
-elif [ -f "/var/lib/iiab-demos/debian-13-generic-amd64.raw" ]; then
-    BASE_IMAGE="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
-else
-    echo "Downloading Debian 13 generic amd64 image..."
-    mkdir -p /var/lib/iiab-demos
-    curl -fL -o /var/lib/iiab-demos/debian-13-generic-amd64.raw \
-        "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw"
-    BASE_IMAGE="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
-fi
 
 ###############################################################################
 # Step 1: Prepare Debian base image

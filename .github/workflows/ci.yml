@@ -56,10 +56,10 @@ jobs:
         run: sudo ./democtl init
       - name: Build unittest demo
         run: |
-          # Use a small size and the unittest config from the IIAB repo
+          # Use a larger size (4000MB) to fit the 3GB base image in the tmpfs build directory
           sudo ./democtl add unittest \
             --edition unittest \
-            --size 2000 \
+            --size 4000 \
             --local-vars vars/local_vars_unittest.yml \
             --no-ram-image \
             --fg
