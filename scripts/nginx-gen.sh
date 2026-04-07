@@ -4,26 +4,14 @@
 # Reads /var/lib/iiab-demos/active/*/config and produces nginx config
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-iiab.sh disable=SC1091
+source "$SCRIPT_DIR/lib-iiab.sh"
+
 STATE_DIR="/var/lib/iiab-demos"
 ACTIVE_DIR="$STATE_DIR/active"
 NGINX_CONF="/etc/nginx/sites-available/iiab-demo.conf"
 CERTBOT_ROOT="/var/www/certbot"
-
-# Sanitize a name into a valid nginx server_name / upstream-safe identifier
-sanitize_subdomain() {
-    local raw="$1"
-    # Lowercase, strip anything except a-z 0-9 and hyphen
-    local cleaned
-    cleaned=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
-    # Remove leading/trailing hyphens
-    cleaned="${cleaned#-}"
-    cleaned="${cleaned%-}"
-    if [ -z "$cleaned" ]; then
-        echo "demo"  # fallback
-    else
-        echo "$cleaned"
-    fi
-}
 
 # Collect active demos into array
 demo_names=()
@@ -191,11 +179,4 @@ generate_nginx > "$NGINX_CONF"
 echo "Generated nginx config: $NGINX_CONF"
 
 # Test and reload
-if nginx -t 2>/dev/null; then
-    systemctl reload nginx
-    echo "Nginx reloaded successfully"
-else
-    echo "Warning: nginx config test failed, not reloading" >&2
-    nginx -t >&2
-    exit 1
-fi
+nginx_reload

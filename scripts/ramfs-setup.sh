@@ -30,6 +30,20 @@ release_ramfs_lock() {
 
 trap release_ramfs_lock EXIT
 
+# Clean up dangling symlinks in /var/lib/machines that point to RAM images
+_cleanup_dangling_symlinks() {
+    echo "Cleaning up dangling symlinks in /var/lib/machines/..."
+    for link in /var/lib/machines/*.raw; do
+        [ -L "$link" ] || continue
+        local target
+        target=$(readlink -f "$link" 2>/dev/null || echo "")
+        if [[ "$target" == /run/iiab-ramfs/* ]] && [ ! -f "$target" ]; then
+            echo "  Removing dangling symlink: $link"
+            rm -f "$link"
+        fi
+    done
+}
+
 load_image() {
     local name="$1"
     local src="/var/lib/machines/${name}.raw"
@@ -114,18 +128,7 @@ unload_image() {
         echo "No images in RAM, unmounting tmpfs..."
         umount "$RAMFS_ROOT"
         rmdir "$RAMFS_ROOT"
-
-        # Clean up symlinks in /var/lib/machines that pointed to RAM images
-        echo "Cleaning up dangling symlinks in /var/lib/machines/..."
-        for link in /var/lib/machines/*.raw; do
-            [ -L "$link" ] || continue
-            local target
-            target=$(readlink -f "$link" 2>/dev/null || echo "")
-            if [[ "$target" == /run/iiab-ramfs/* ]] && [ ! -f "$target" ]; then
-                echo "  Removing dangling symlink: $link"
-                rm -f "$link"
-            fi
-        done
+        _cleanup_dangling_symlinks
     fi
 }
 
@@ -154,18 +157,7 @@ cleanup() {
         echo "Unmounting RAMFS and removing all images..."
         umount "$RAMFS_ROOT"
         rmdir "$RAMFS_ROOT"
-
-        # Clean up symlinks in /var/lib/machines that pointed to RAM images
-        echo "Cleaning up dangling symlinks in /var/lib/machines/..."
-        for link in /var/lib/machines/*.raw; do
-            [ -L "$link" ] || continue
-            local target
-            target=$(readlink -f "$link" 2>/dev/null || echo "")
-            if [[ "$target" == /run/iiab-ramfs/* ]] && [ ! -f "$target" ]; then
-                echo "  Removing dangling symlink: $link"
-                rm -f "$link"
-            fi
-        done
+        _cleanup_dangling_symlinks
         echo "Cleanup complete"
     else
         echo "RAMFS not mounted, nothing to clean"

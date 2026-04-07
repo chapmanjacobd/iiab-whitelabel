@@ -4,13 +4,14 @@
 # Usage: sudo bash host-setup.sh
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-iiab.sh disable=SC1091
+source "$SCRIPT_DIR/lib-iiab.sh"
+
 echo "=== Setting up IIAB Demo Server Host ==="
 
 # Ensure root
-if [ "$EUID" -ne 0 ]; then
-    echo "Error: This script must be run as root" >&2
-    exit 1
-fi
+ensure_root "$@"
 
 ###############################################################################
 # 1. Install required packages (idempotent)
@@ -200,22 +201,7 @@ EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
 if [ -z "$EXT_IF" ]; then
     echo "Warning: Could not detect external interface, skipping iptables" >&2
 else
-    # Add NAT masquerade (idempotent check)
-    if ! iptables -t nat -C POSTROUTING -o "$EXT_IF" -j MASQUERADE 2>/dev/null; then
-        echo "Adding NAT masquerade for $EXT_IF..."
-        iptables -t nat -A POSTROUTING -o "$EXT_IF" -j MASQUERADE
-    else
-        echo "NAT masquerade already configured"
-    fi
-
-    # Allow forwarding from containers to internet (idempotent check)
-    if ! iptables -C FORWARD -i ve-+ -o "$EXT_IF" -j ACCEPT 2>/dev/null; then
-        echo "Adding container forwarding rules..."
-        iptables -A FORWARD -i ve-+ -o "$EXT_IF" -j ACCEPT
-        iptables -A FORWARD -i "$EXT_IF" -o ve-+ -m state --state RELATED,ESTABLISHED -j ACCEPT
-    else
-        echo "Container forwarding rules already configured"
-    fi
+    setup_iptables_nat "$EXT_IF"
 fi
 
 # Make iptables persistent
@@ -233,14 +219,7 @@ iptables-save > /etc/iptables/rules.v4
 echo ""
 echo "=== Creating required directories ==="
 
-for dir in /var/lib/machines /var/www/certbot; do
-    if [ ! -d "$dir" ]; then
-        echo "Creating $dir..."
-        mkdir -p "$dir"
-    else
-        echo "$dir already exists"
-    fi
-done
+ensure_dirs /var/lib/machines /var/www/certbot
 
 ###############################################################################
 # 8. Test nginx configuration
@@ -248,12 +227,10 @@ done
 echo ""
 echo "=== Testing nginx configuration ==="
 
-if nginx -t 2>/dev/null; then
+if nginx_reload; then
     echo "nginx config test passed"
-    systemctl reload nginx
 else
     echo "Warning: nginx config test failed, please check manually" >&2
-    nginx -t
 fi
 
 echo ""

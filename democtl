@@ -22,6 +22,9 @@ DISK_BASE=0       # No extra disk headroom; use requested size exactly
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
 
+# shellcheck source=scripts/lib-iiab.sh disable=SC1091
+source "$SCRIPT_DIR/lib-iiab.sh"
+
 ###############################################################################
 # Flock-based resource protection
 ###############################################################################
@@ -118,11 +121,6 @@ release_lock() {
 ###############################################################################
 # Utility functions
 ###############################################################################
-ensure_root() {
-    if [ "$EUID" -ne 0 ]; then
-        exec sudo "$0" "$@"
-    fi
-}
 
 ensure_state_dirs() {
     mkdir -p "$STATE_DIR" "$ACTIVE_DIR"
@@ -229,20 +227,6 @@ _validate_script() {
         return 1
     fi
     return 0
-}
-
-# Sanitize a name into a valid nginx server_name / upstream-safe identifier
-sanitize_subdomain() {
-    local raw="$1"
-    local cleaned
-    cleaned=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
-    cleaned="${cleaned#-}"
-    cleaned="${cleaned%-}"
-    if [ -z "$cleaned" ]; then
-        echo "demo"
-    else
-        echo "$cleaned"
-    fi
 }
 
 ###############################################################################

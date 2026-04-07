@@ -12,6 +12,10 @@
 #     [--local-vars <path>] [--image-source <path>]
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-iiab.sh disable=SC1091
+source "$SCRIPT_DIR/lib-iiab.sh"
+
 # Defaults
 NAME=""
 IIAB_REPO="https://github.com/iiab/iiab.git"
@@ -269,12 +273,7 @@ systemctl is-active --quiet systemd-resolved || systemctl start systemd-resolved
 sysctl -w net.ipv4.ip_forward=1
 
 EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-iptables -t nat -C POSTROUTING -o "$EXT_IF" -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -A POSTROUTING -o "$EXT_IF" -j MASQUERADE
-iptables -C FORWARD -i ve-+ -o "$EXT_IF" -j ACCEPT 2>/dev/null || {
-    iptables -A FORWARD -i ve-+ -o "$EXT_IF" -j ACCEPT
-    iptables -A FORWARD -i "$EXT_IF" -o ve-+ -m state --state RELATED,ESTABLISHED -j ACCEPT
-}
+setup_iptables_nat "$EXT_IF"
 
 systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force
 rm -f "$MOUNT_DIR/etc/resolv.conf"

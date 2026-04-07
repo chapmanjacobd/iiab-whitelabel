@@ -82,3 +82,17 @@ Then go to https://**pr123**.iiab.io/home/
 ### Logs
 - Build: `/var/lib/iiab-demos/active/<name>/build.log` (or `democtl logs <name>`).
 - Runtime: `journalctl -u systemd-nspawn@<name>.service`.
+
+### Not enough RAM
+```bash
+democtl list              # See allocations
+democtl remove <name>     # Free resources
+democtl ramfs status      # Check tmpfs usage
+democtl ramfs cleanup     # Free all RAM
+```
+
+### nginx returns 502
+```bash
+democtl list              # Verify container is running
+democtl shell <name>      # Check inside container
+```

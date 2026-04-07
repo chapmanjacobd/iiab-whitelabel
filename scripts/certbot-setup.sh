@@ -4,13 +4,14 @@
 # Usage: sudo bash certbot-setup.sh
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-iiab.sh disable=SC1091
+source "$SCRIPT_DIR/lib-iiab.sh"
+
 echo "=== Setting up Let's Encrypt Certificates ==="
 
 # Ensure root
-if [ "$EUID" -ne 0 ]; then
-    echo "Error: This script must be run as root" >&2
-    exit 1
-fi
+ensure_root "$@"
 
 ###############################################################################
 # Configuration
@@ -25,15 +26,7 @@ NGINX_LOG_DIR="/var/log/nginx"
 echo ""
 echo "=== Creating required directories ==="
 
-for dir in "$CERTBOT_ROOT" "$NGINX_LOG_DIR"; do
-    if [ ! -d "$dir" ]; then
-        echo "Creating $dir..."
-        mkdir -p "$dir"
-        chmod 0755 "$dir"
-    else
-        echo "$dir already exists"
-    fi
-done
+ensure_dirs "$CERTBOT_ROOT" "$NGINX_LOG_DIR"
 
 ###############################################################################
 # 2. Collect active demo domains
@@ -44,20 +37,6 @@ echo "=== Collecting active demo domains ==="
 STATE_DIR="/var/lib/iiab-demos"
 ACTIVE_DIR="$STATE_DIR/active"
 DOMAINS=()
-
-# Sanitize subdomain name for nginx/certbot compatibility
-sanitize_subdomain() {
-    local raw="$1"
-    local cleaned
-    cleaned=$(echo "$raw" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
-    cleaned="${cleaned#-}"
-    cleaned="${cleaned%-}"
-    if [ -z "$cleaned" ]; then
-        echo "demo"
-    else
-        echo "$cleaned"
-    fi
-}
 
 if [ -d "$ACTIVE_DIR" ]; then
     for demo_dir in "$ACTIVE_DIR"/*/; do
@@ -173,12 +152,10 @@ fi
 echo ""
 echo "=== Testing nginx configuration ==="
 
-if nginx -t 2>/dev/null; then
+if nginx_reload; then
     echo "nginx config test passed"
-    systemctl reload nginx
 else
     echo "Warning: nginx config test failed, please check manually" >&2
-    nginx -t
 fi
 
 echo ""
