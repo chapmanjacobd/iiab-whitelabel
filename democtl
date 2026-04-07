@@ -650,19 +650,22 @@ build_demo() {
     systemctl enable --now "systemd-nspawn@${name}.service" 2>/dev/null || true
 
     # Poll for actual container startup (nspawn can fail asynchronously)
-    # We check for SubState=running (not just "activating" which covers crash-loops)
+    # We check SubState on the nspawn service itself, not the machine scope.
     sleep 3
     local poll_count=0
     local poll_max=20
     local container_active=false
     while [ $poll_count -lt $poll_max ]; do
-        local substate=""
-        # --value strips the property name on newer systemd; fallback without it
-        substate=$(systemctl show "machine-${name}.service" --property=SubState --value 2>/dev/null || echo "")
-        log_demo "$name" "  poll ${poll_count}: substate='${substate}'"
-        # Handle both "running" and "SubState=running" (older --value behavior)
-        if [ "$substate" = "running" ] || [ "$substate" = "SubState=running" ]; then
+        local active="" substate=""
+        active=$(systemctl show "systemd-nspawn@${name}.service" --property=ActiveState --value 2>/dev/null || echo "")
+        substate=$(systemctl show "systemd-nspawn@${name}.service" --property=SubState --value 2>/dev/null || echo "")
+        # Handle both stripped and non-stripped values (older systemd)
+        if [ "$substate" = "running" ] || [[ "$substate" == *"=running" ]]; then
             container_active=true
+            break
+        fi
+        # Also catch crash-looping: active=activating with substate=auto-restart
+        if [ "$substate" = "auto-restart" ] || [[ "$substate" == *"=auto-restart" ]]; then
             break
         fi
         poll_count=$((poll_count + 1))
@@ -671,12 +674,8 @@ build_demo() {
 
     if ! $container_active; then
         log_demo "$name" "Error: Container did not start successfully within ${poll_max}s"
-        log_demo "$name" "--- machine-${name}.service state ---"
-        systemctl show "machine-${name}.service" --property=ActiveState,SubState,ExecMainStatus 2>&1 || true
         log_demo "$name" "--- systemd-nspawn@${name}.service state ---"
         systemctl show "systemd-nspawn@${name}.service" --property=ActiveState,SubState,ExecMainStatus 2>&1 || true
-        log_demo "$name" "--- journalctl -u machine-${name}.service (last 50 lines) ---"
-        journalctl -u "machine-${name}.service" --no-pager -n 50 2>&1 || true
         log_demo "$name" "--- journalctl _COMM=systemd-nspawn (last 30 lines) ---"
         journalctl _COMM=systemd-nspawn --no-pager -n 30 2>&1 || true
         log_demo "$name" "--- Full journal for nspawn@${name}.service (last 50 lines) ---"
