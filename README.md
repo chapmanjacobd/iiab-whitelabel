@@ -115,21 +115,35 @@ democtl add small --local-vars vars/local_vars_small.yml --build-on-disk
 
 ## Makefile
 
-The Makefile provides convenience targets for the three standard demos:
+The Makefile provides convenience targets for initial setup and the three standard demos:
 
 ```bash
 make install             # Full setup: init → add demos → obtain SSL certs
-make small medium large  # Add all three standard demos
-make list                # List all demos
-make status              # Show status of all demos
-make logs NAME=small     # View logs for a demo
-make certbot             # Obtain/renew Let's Encrypt certificates
-make ramfs-status        # Check RAM usage
-make stop                # Stop all demos
+make init                # Host bootstrap only
+make small medium large  # Add standard demos
+make status              # Show status (or: make status NAME=small)
+make stop                # Stop all running demos
 make clean               # Remove everything
+make test                # Run syntax/lint checks
 ```
 
-### Custom demos (README)
+For everything else, use `democtl` directly:
+
+```bash
+democtl list                     # List all demos
+democtl logs small               # View build log for a demo
+democtl reload                   # Regenerate nginx config
+democtl certbot                  # Obtain/renew Let's Encrypt certs
+democtl ramfs status             # Check RAM usage
+democtl ramfs cleanup            # Free all RAM
+democtl reconcile                # Fix resource counter drift
+democtl shell small              # Open shell in container
+democtl add <name> [flags]       # Add a custom demo
+democtl remove <name>            # Remove a demo
+democtl rebuild <name>           # Remove and re-add a demo
+```
+
+### Custom demos
 
 To add a demo with a custom repo or branch (e.g. testing a pull request), call `democtl add` directly:
 

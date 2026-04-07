@@ -1,8 +1,7 @@
 # IIAB Whitelabel Demo Server
 # CLI wrapper with convenience targets
 
-.PHONY: help init install list status logs reload stop clean reconcile test \
-        small medium large
+.PHONY: help init install small medium large status test stop clean
 
 # Default target
 help:
@@ -44,10 +43,6 @@ large:
 		--fallback \
 		--local-vars vars/local_vars_large.yml
 
-# List all demos
-list:
-	bash democtl list
-
 # Status of all demos (or specify a name with NAME=)
 status:
 	@if [ -n "$(NAME)" ]; then \
@@ -55,18 +50,6 @@ status:
 	else \
 		bash democtl list; \
 	fi
-
-# Logs for a specific demo (make logs NAME=small)
-logs:
-	bash democtl logs $(or $(NAME),)
-
-# Operations
-reload:
-	bash democtl reload
-
-# Certificates (setup/refresh)
-certbot:
-	bash scripts/certbot-setup.sh
 
 # Testing
 test:
@@ -78,23 +61,6 @@ test:
 	@echo "Testing help..."
 	bash democtl help >/dev/null
 	@echo "All local tests passed."
-
-# RAMFS management (direct passthrough)
-ramfs-load:
-	bash democtl ramfs load
-
-ramfs-unload:
-	bash democtl ramfs unload
-
-ramfs-status:
-	bash democtl ramfs status
-
-ramfs-cleanup:
-	bash democtl ramfs cleanup
-
-# Reconcile resource counters
-reconcile:
-	bash democtl reconcile
 
 # Stop all running demos
 stop:
