@@ -423,9 +423,6 @@ cmd_add() {
         return 1
     fi
 
-    # Allocate resources (under lock)
-    allocate_resources "$name" "$size_mb" "$ram_image"
-
     # Assign IP (under lock)
     local ip
     ip=$(next_ip)
@@ -435,6 +432,7 @@ cmd_add() {
     mkdir -p "$demo_dir"
 
     # Write config (under lock)
+    # Resources are now "allocated" just by this file existing.
     cat > "$demo_dir/config" << EOF
 DEMO_NAME="$name"
 IIAB_REPO="$repo"
@@ -994,50 +992,16 @@ cmd_reconcile() {
     }
     trap release_lock EXIT
 
+    # load_resources dynamically calculates allocations from active configs
     load_resources
-
-    local old_disk_allocated="$DISK_ALLOCATED"
-    local old_ram_allocated="$RAM_ALLOCATED"
-    local new_disk_allocated=0
-    local new_ram_allocated=0
-    local reconciled=0
-
-    for demo_dir in "$ACTIVE_DIR"/*/; do
-        [ -d "$demo_dir" ] || continue
-        local name
-        name=$(basename "$demo_dir")
-
-        if [ ! -f "$demo_dir/config" ]; then
-            echo "  Warning: $name has no config file, skipping"
-            continue
-        fi
-
-        # shellcheck source=/dev/null
-        source "$demo_dir/config"
-
-        local size_mb=0
-        if [ -n "${IMAGE_SIZE_MB:-}" ]; then
-            size_mb="$IMAGE_SIZE_MB"
-        fi
-
-        if [ "${RAM_IMAGE:-false}" = "true" ]; then
-            new_ram_allocated=$(( new_ram_allocated + size_mb ))
-        else
-            new_disk_allocated=$(( new_disk_allocated + size_mb ))
-        fi
-        reconciled=$((reconciled + 1))
-    done
-
-    DISK_ALLOCATED="$new_disk_allocated"
-    RAM_ALLOCATED="$new_ram_allocated"
     save_resources
 
     release_lock
     trap - EXIT
 
-    echo "Reconciled $reconciled demo(s)."
-    echo "  Disk allocated: ${old_disk_allocated}MB → ${new_disk_allocated}MB"
-    echo "  RAM allocated:  ${old_ram_allocated}MB → ${new_ram_allocated}MB"
+    echo "Reconciled resource allocations from active demos."
+    echo "  Disk allocated: ${DISK_ALLOCATED}MB"
+    echo "  RAM allocated:  ${RAM_ALLOCATED}MB"
 
     # Check for ghost IPs (IPs assigned but no running container)
     echo ""
