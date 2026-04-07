@@ -43,11 +43,9 @@ SETTINGS_DIR="/etc/systemd/nspawn"
 mkdir -p "$SETTINGS_DIR"
 
 # Build the [Files] section
-FILES_SECTION="[Files]
-Uncompressed=yes"
+FILES_SECTION=""
 if [[ "$VOLATILE" != "no" ]]; then
-    FILES_SECTION="${FILES_SECTION}
-Volatile=${VOLATILE}"
+    FILES_SECTION="Volatile=${VOLATILE}"
 fi
 
 cat > "${SETTINGS_DIR}/${NAME}.nspawn" << EOF
@@ -59,10 +57,6 @@ PrivateUsers=no
 [Network]
 VirtualEthernet=true
 Bridge=iiab-br0
-IPAddress=${IP}/24
-Gateway=10.0.3.1
-DNS=8.8.8.8
-DNS=1.1.1.1
 
 ${FILES_SECTION}
 EOF

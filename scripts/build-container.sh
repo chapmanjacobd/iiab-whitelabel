@@ -256,6 +256,20 @@ fi
 # Set hostname
 echo "$NAME" > "$MOUNT_DIR/etc/hostname"
 
+# Configure container IP via systemd-networkd inside the image
+# The ve-* interface is created by nspawn --network-veth on the host side
+mkdir -p "$MOUNT_DIR/etc/systemd/network"
+cat > "$MOUNT_DIR/etc/systemd/network/ve-default.network" << EOF
+[Match]
+Name=ve-* host-* eth0
+
+[Network]
+Address=$IP/24
+Gateway=10.0.3.1
+DNS=8.8.8.8
+DNS=1.1.1.1
+EOF
+
 # Container and hardware-specific overrides
 cat >> "$MOUNT_DIR/etc/iiab/local_vars.yml" << 'EOF'
 is_VM: True

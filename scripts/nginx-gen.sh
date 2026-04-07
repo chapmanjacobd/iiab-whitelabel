@@ -180,8 +180,11 @@ echo "Generated nginx config: $NGINX_CONF"
 echo "--- Generated config (first 60 lines) ---"
 head -60 "$NGINX_CONF"
 echo "---"
-echo "--- Main nginx.conf include directives ---"
-grep -n 'include' /etc/nginx/nginx.conf 2>/dev/null || true
+echo "--- Main nginx.conf ---"
+cat /etc/nginx/nginx.conf 2>/dev/null || true
+echo "---"
+echo "--- /etc/nginx/sites-enabled/ contents ---"
+ls -la /etc/nginx/sites-enabled/ 2>/dev/null || true
 echo "---"
 
 # Test and reload
