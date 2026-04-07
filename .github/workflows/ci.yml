@@ -71,6 +71,8 @@ jobs:
           captiveportal_install: False
           captiveportal_enabled: False
           iiab_admin_user_install: False
+          sshd_install: False
+          sshd_enabled: False
           EOF
 
           # Use a larger size (4000MB) to fit the 3GB base image in the tmpfs build directory

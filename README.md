@@ -4,17 +4,12 @@ Automated infrastructure for deploying IIAB editions as subdomain-routed contain
 
 This system manages the full lifecycle of IIAB demo instances on a Debian 13 host. It uses `systemd-nspawn` for isolation, `nginx` for dynamic routing of `*.iiab.io` subdomains, and `certbot` for automated TLS.
 
----
 
 ## Quick Start
 
-1. Initialize Host: `sudo democtl init` (Installs packages, configures bridge and Nginx).
-2. Deploy Demos: `make small medium large` (Adds standard IIAB configurations).
-3. Secure: `make certbot` (Obtains wildcard-ready SSL certificates).
-
-> Pro-tip: Run `sudo make install` to execute all three steps in one shot.
-
----
+```
+sudo make install
+```
 
 ## The `democtl` CLI
 
@@ -30,7 +25,6 @@ The `democtl` tool is the primary interface for managing demos.
 
 ### Important Flags
 | Flag | Default | Description |
-|---|---|---|
 | `--repo` | `github.com/iiab/iiab.git` | Source repository for IIAB. |
 | `--branch` | `master` | Git ref (branch, tag, or PR head). |
 | `--local-vars` | `vars/local_vars_small.yml` | Path to IIAB configuration variables. |
@@ -39,7 +33,6 @@ The `democtl` tool is the primary interface for managing demos.
 | `--build-on-disk`| `false` | Perform build on disk instead of RAM (tmpfs). |
 | `--volatile` | `state` | Resilience: `no` (persistent), `state` (reset /var), `yes` (stateless). |
 
----
 
 ## Technical Architecture
 
@@ -64,7 +57,7 @@ There are three independent layers of storage handling:
 - Internal: Containers receive unique IPs from an internal pool (`10.0.3.x`).
 - External: `scripts/nginx-gen.sh` dynamically maps subdomains to container IPs and manages ACME challenge paths for Certbot.
 
----
+
 
 ## Development & Troubleshooting
 
