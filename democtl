@@ -14,10 +14,8 @@ DEMO_GW="10.0.3.1"
 SUBNET_BASE="10.0.3"
 BRIDGE="iiab-br0"
 DISK_BASE=500  # MB base image + OS overhead buffer
-DISK_BUFFER=2000  # Extra MB buffer per non-ram-image demo
 RAM_BUFFER=512    # Extra MB buffer per ram-image demo
 
-NSPAWN_DIR="${STATE_DIR}/nspawn-loop"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
 
 ###############################################################################
@@ -563,34 +561,6 @@ build_demo() {
     local ip
     ip=$(cat "$demo_dir/ip")
 
-    # Ensure nspawn-loop is available (with lock for concurrent builds)
-    local clone_result=0
-    (
-        acquire_lock 600  # Wait up to 10 mins for initial clone if needed
-        if [ ! -d "$NSPAWN_DIR" ]; then
-            log_demo "$name" "Cloning nspawn-loop..."
-            mkdir -p "$STATE_DIR"
-            if ! git clone --depth 1 https://github.com/chapmanjacobd/nspawn-loop.git "$NSPAWN_DIR" 2>&1; then
-                echo "CLONE_FAILED"
-                exit 1
-            fi
-        fi
-    ) || clone_result=1
-
-    if [ "$clone_result" -ne 0 ]; then
-        log_demo "$name" "Error: Failed to clone nspawn-loop repository"
-        echo "failed" > "$demo_dir/status"
-        _rollback_build_resources "$name"
-        return 1
-    fi
-
-    if [ ! -d "$NSPAWN_DIR" ]; then
-        log_demo "$name" "Error: nspawn-loop not found at $NSPAWN_DIR"
-        echo "failed" > "$demo_dir/status"
-        _rollback_build_resources "$name"
-        return 1
-    fi
-
     # Build the container image using build-container.sh
     local build_script="${SCRIPT_DIR}/build-container.sh"
 
@@ -624,7 +594,6 @@ build_demo() {
         "--size" "$IMAGE_SIZE_MB"
         "--volatile" "$VOLATILE"
         "--ip" "$ip"
-        "--nspawn-dir" "$NSPAWN_DIR"
     )
 
     # For RAM demos: load base image into RAM first, then build from RAM
@@ -635,8 +604,8 @@ build_demo() {
         if [ ! -f "/run/iiab-ramfs/base-image.raw" ]; then
             # Find the base image to load into RAM
             local base_image=""
-            if [ -f "${NSPAWN_DIR}/debian-13-generic-amd64.img" ]; then
-                base_image="${NSPAWN_DIR}/debian-13-generic-amd64.img"
+            if [ -f "/var/lib/iiab-demos/debian-13-generic-amd64.raw" ]; then
+                base_image="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
             fi
 
             if [ -n "$base_image" ]; then

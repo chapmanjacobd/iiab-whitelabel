@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # build-container.sh - Build an IIAB container image with arbitrary config
+# No external dependencies — all mount/loop/shrink logic is inlined.
 # Usage:
 #   build-container.sh --name <name> --edition <edition> \
 #     --repo <repo> --branch <branch> --size <MB> \
 #     --volatile <mode> --ip <ip> [--ram-image] [--local-vars <path>]
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Defaults
 NAME=""
@@ -19,7 +17,6 @@ VOLATILE="state"
 IP=""
 RAM_IMAGE=false
 LOCAL_VARS=""
-NSPAWN_DIR=""
 IMAGE_SOURCE=""
 
 # Parse arguments
@@ -34,7 +31,6 @@ while [[ $# -gt 0 ]]; do
         --ip)         IP="$2"; shift 2 ;;
         --ram-image)  RAM_IMAGE=true; shift ;;
         --local-vars) LOCAL_VARS="$2"; shift 2 ;;
-        --nspawn-dir) NSPAWN_DIR="$2"; shift 2 ;;
         --image-source) IMAGE_SOURCE="$2"; shift 2 ;;
         *)
             echo "Warning: Unknown option: $1" >&2
@@ -42,16 +38,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-# Resolve NSPAWN_DIR
-if [ -z "$NSPAWN_DIR" ]; then
-    NSPAWN_DIR="${PROJECT_DIR}/nspawn-loop"
-fi
-
-if [ ! -d "$NSPAWN_DIR" ]; then
-    echo "Error: nspawn-loop directory not found: $NSPAWN_DIR" >&2
-    exit 1
-fi
 
 # Validate required args
 if [ -z "$NAME" ]; then
@@ -69,71 +55,124 @@ fi
 echo "=========================================="
 echo "Building IIAB container: $NAME"
 echo "=========================================="
-echo "Edition:  $EDITION"
-echo "Branch:   $IIAB_BRANCH"
-echo "Repo:     $IIAB_REPO"
-echo "Size:     ${SIZE_MB}MB"
-echo "Volatile: $VOLATILE"
-echo "IP:       $IP"
+echo "Edition:   $EDITION"
+echo "Branch:    $IIAB_BRANCH"
+echo "Repo:      $IIAB_REPO"
+echo "Size:      ${SIZE_MB}MB"
+echo "Volatile:  $VOLATILE"
+echo "IP:        $IP"
 echo "RAM image: $RAM_IMAGE"
 echo "Local vars: ${LOCAL_VARS:-(none)}"
 
-# local_vars path is relative to the IIAB repo (will be resolved after clone/copy)
-# If absolute path provided, use as-is
-if [[ "$LOCAL_VARS" != /* ]] && [ -n "$LOCAL_VARS" ]; then
-    # Relative path - will be resolved relative to IIAB repo in container
-    IIAB_VARS_PATH="$LOCAL_VARS"
-elif [ -z "$LOCAL_VARS" ]; then
-    # Default to edition-based path in IIAB repo
-    IIAB_VARS_PATH="vars/local_vars_${EDITION}.yml"
+###############################################################################
+# Build working directory
+###############################################################################
+BUILD_DIR="/var/lib/iiab-demos/build/${NAME}"
+MOUNT_DIR="${BUILD_DIR}/rootfs"
+WORK_IMG="${BUILD_DIR}/work.img"
+mkdir -p "$BUILD_DIR" "$MOUNT_DIR"
+
+# Cleanup on exit or failure
+LOOPDEV=""
+cleanup() {
+    if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
+        echo "Warning: Mount still active at $MOUNT_DIR — cleaning up" >&2
+        umount -l "$MOUNT_DIR" 2>/dev/null || true
+    fi
+    if [ -n "$LOOPDEV" ] && losetup "$LOOPDEV" &>/dev/null; then
+        echo "Warning: Loop device $LOOPDEV still attached — detaching" >&2
+        losetup --detach "$LOOPDEV" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+###############################################################################
+# Resolve base image source
+###############################################################################
+BASE_IMAGE=""
+if [ -n "$IMAGE_SOURCE" ] && [ -f "$IMAGE_SOURCE" ]; then
+    BASE_IMAGE="$IMAGE_SOURCE"
+elif [ -f "/run/iiab-ramfs/base-image.raw" ]; then
+    BASE_IMAGE="/run/iiab-ramfs/base-image.raw"
+elif [ -f "/var/lib/iiab-demos/debian-13-generic-amd64.raw" ]; then
+    BASE_IMAGE="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
 else
-    # Absolute path - use directly
-    IIAB_VARS_PATH=""
+    echo "Downloading Debian 13 generic amd64 image..."
+    mkdir -p /var/lib/iiab-demos
+    curl -fL -o /var/lib/iiab-demos/debian-13-generic-amd64.raw \
+        "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw"
+    BASE_IMAGE="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
 fi
 
-# Step 1: Mount Debian image
+###############################################################################
+# Step 1: Prepare Debian base image (inline mount.sh logic)
+###############################################################################
 echo ""
 echo "=== Step 1: Preparing Debian base image ==="
 
-# For RAM demos, the base image is already loaded into tmpfs
-if [ -n "$IMAGE_SOURCE" ] && [ -f "$IMAGE_SOURCE" ]; then
-    sudo "${NSPAWN_DIR}/mount.sh" "$IMAGE_SOURCE" "$SIZE_MB"
-elif [ -f "${NSPAWN_DIR}/debian-13-generic-amd64.img" ]; then
-    sudo "${NSPAWN_DIR}/mount.sh" "${NSPAWN_DIR}/debian-13-generic-amd64.img" "$SIZE_MB"
-elif [ -f "/run/iiab-ramfs/base-image.raw" ]; then
-    echo "Using base image from RAM (tmpfs)..."
-    sudo "${NSPAWN_DIR}/mount.sh" "/run/iiab-ramfs/base-image.raw" "$SIZE_MB"
-else
-    echo "Downloading Debian 13 generic amd64 image..."
-    sudo "${NSPAWN_DIR}/mount.sh" \
-        "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw" \
-        "$SIZE_MB"
+# Copy base image to working file (never modify the source in-place)
+echo "Copying base image to working file..."
+cp --reflink=auto "$BASE_IMAGE" "$WORK_IMG"
+
+# Grow image to target size
+CURRENT_BYTES=$(stat -c %s "$WORK_IMG")
+CURRENT_MB=$(( CURRENT_BYTES / 1024 / 1024 ))
+ADDITIONAL_MB=$(( SIZE_MB - CURRENT_MB ))
+if [ "$ADDITIONAL_MB" -gt 0 ]; then
+    echo "Growing image from ${CURRENT_MB}MB to ${SIZE_MB}MB..."
+    truncate -s "${SIZE_MB}M" "$WORK_IMG"
 fi
 
-# Find the state file
-STATE_FILE=$(find "$NSPAWN_DIR" -maxdepth 1 -name "*.state" | head -n 1)
-if [ -z "$STATE_FILE" ]; then
-    echo "Error: No .state file found after mount" >&2
+# Create loop device with partition scanning
+LOOPDEV=$(losetup --find "$WORK_IMG" --nooverlap --show --partscan)
+echo "Loop device: $LOOPDEV"
+
+# Fix GPT backup header (Debian images are GPT)
+if command -v sgdisk &>/dev/null; then
+    sgdisk -e "$LOOPDEV" 2>/dev/null || true
+fi
+
+# Wait for partition device
+for i in $(seq 1 30); do
+    [ -b "${LOOPDEV}p1" ] && break
+    sleep 1
+done
+if [ ! -b "${LOOPDEV}p1" ]; then
+    echo "Error: Partition ${LOOPDEV}p1 not found after 30s" >&2
     exit 1
 fi
 
-# shellcheck source=/dev/null
-source "$STATE_FILE"
-echo "Mount directory: $MOUNT_DIR"
+# Resize partition to fill the image
+echo "Resizing partition to fill available space..."
+parted --script "$LOOPDEV" resizepart 1 100%
+sync
+partprobe "$LOOPDEV" 2>/dev/null || true
+udevadm settle 2>/dev/null || sleep 2
 
+# Resize filesystem
+PARTDEV="${LOOPDEV}p1"
+echo "Checking and resizing filesystem..."
+e2fsck -p -f "$PARTDEV"
+resize2fs "$PARTDEV"
+e2fsck -p -f "$PARTDEV"
+
+# Mount
+echo "Mounting root filesystem at $MOUNT_DIR..."
+mount "$PARTDEV" "$MOUNT_DIR"
+
+echo "Base image ready at $MOUNT_DIR ($(du -sh "$MOUNT_DIR" | cut -f1))"
+
+###############################################################################
 # Step 2: Prepare the container rootfs
+###############################################################################
 echo ""
 echo "=== Step 2: Preparing container rootfs ==="
 
-# Install IIAB code
-mkdir -p "$MOUNT_DIR/opt/iiab"
-
-# Determine IIAB source: clone from repository
+# Clone IIAB
 echo "Cloning IIAB from $IIAB_REPO (branch: $IIAB_BRANCH)..."
-# Handle refspec for PRs
+mkdir -p "$MOUNT_DIR/opt/iiab"
 if [[ "$IIAB_BRANCH" == refs/pull/* ]]; then
     git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
-    # Fetch the specific PR ref
     (cd "$MOUNT_DIR/opt/iiab/iiab" && \
         git fetch --depth 1 "$IIAB_REPO" "$IIAB_BRANCH" && \
         git checkout FETCH_HEAD)
@@ -142,10 +181,18 @@ else
         git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
 fi
 
+# Resolve local_vars path
+if [[ "$LOCAL_VARS" != /* ]] && [ -n "$LOCAL_VARS" ]; then
+    IIAB_VARS_PATH="$LOCAL_VARS"
+elif [ -z "$LOCAL_VARS" ]; then
+    IIAB_VARS_PATH="vars/local_vars_${EDITION}.yml"
+else
+    IIAB_VARS_PATH=""
+fi
+
 # Install IIAB configuration
 mkdir -p "$MOUNT_DIR/etc/iiab"
 
-# Copy local_vars from the cloned IIAB repo in the container
 VARS_COPIED=false
 if [ -n "$IIAB_VARS_PATH" ]; then
     CONTAINER_VARS_FILE="$MOUNT_DIR/opt/iiab/iiab/$IIAB_VARS_PATH"
@@ -156,13 +203,11 @@ if [ -n "$IIAB_VARS_PATH" ]; then
     else
         echo "Error: local_vars not found at $IIAB_VARS_PATH in IIAB repo" >&2
         echo "  Expected: $CONTAINER_VARS_FILE" >&2
-        echo "  Check that the file exists in this branch/ref of $IIAB_REPO" >&2
         exit 1
     fi
 fi
 
 if ! $VARS_COPIED && [ -n "$LOCAL_VARS" ] && [[ "$LOCAL_VARS" == /* ]] && [ -f "$LOCAL_VARS" ]; then
-    # Fallback: use absolute path from host if provided and exists
     echo "Using local_vars from host: $LOCAL_VARS"
     cp --preserve=mode,timestamps "$LOCAL_VARS" "$MOUNT_DIR/etc/iiab/local_vars.yml"
     VARS_COPIED=true
@@ -170,8 +215,6 @@ fi
 
 if ! $VARS_COPIED; then
     echo "Error: No valid local_vars file found" >&2
-    echo "  Tried: $IIAB_VARS_PATH (in IIAB repo)" >&2
-    echo "  Specify --local-vars with a path relative to the IIAB repo" >&2
     exit 1
 fi
 
@@ -182,7 +225,7 @@ sed -i 's/^iiab_admin_user_install: True/iiab_admin_user_install: False/' "$MOUN
 # Set hostname
 echo "$NAME" > "$MOUNT_DIR/etc/hostname"
 
-# Disable WiFi/hostapd (not needed in containers)
+# Disable WiFi/hostapd
 cat >> "$MOUNT_DIR/etc/iiab/local_vars.yml" << 'EOF'
 # Disabled for container deployment
 hostapd_install: False
@@ -191,16 +234,17 @@ captiveportal_install: False
 captiveportal_enabled: False
 EOF
 
+###############################################################################
 # Step 3: Run IIAB installer inside nspawn
+###############################################################################
 echo ""
 echo "=== Step 3: Running IIAB installer (this takes 30-60 minutes) ==="
 
-# Ensure host networking is ready
+# Network setup
 systemctl is-active --quiet systemd-networkd || systemctl start systemd-networkd
 systemctl is-active --quiet systemd-resolved || systemctl start systemd-resolved
 sysctl -w net.ipv4.ip_forward=1
 
-# Setup NAT if not already done
 EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
 iptables -t nat -C POSTROUTING -o "$EXT_IF" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -o "$EXT_IF" -j MASQUERADE
@@ -212,7 +256,7 @@ iptables -C FORWARD -i ve-+ -o "$EXT_IF" -j ACCEPT 2>/dev/null || {
 systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force
 echo "nameserver 8.8.8.8" > "$MOUNT_DIR/etc/resolv.conf"
 
-# Create a robust build script to run inside the container
+# Build script to run inside container
 cat > "$MOUNT_DIR/root/run_build.sh" << 'EOF_SCRIPT'
 #!/bin/bash
 set -euo pipefail
@@ -240,7 +284,6 @@ expect {
     "photographed" { send "\r" }
 }
 
-# Wait for reboot prompt
 expect "login: " { send "root\r" }
 
 expect -re {#\s?$} { send "usermod --lock --expiredate=1 root\r" }
@@ -251,11 +294,13 @@ EXPECT_EOF
 echo ""
 echo "=== IIAB install complete ==="
 
-# Step 4: Shrink the image
+###############################################################################
+# Step 4: Shrink the image (inline shrink.sh logic)
+###############################################################################
 echo ""
 echo "=== Step 4: Shrinking image ==="
 
-# Add metadata
+# Add metadata before cleanup
 echo "$NAME" > "$MOUNT_DIR/.iiab-image"
 echo "Build date: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$MOUNT_DIR/.iiab-image"
 echo "Edition: $EDITION" >> "$MOUNT_DIR/.iiab-image"
@@ -268,49 +313,114 @@ rm -f "$MOUNT_DIR/etc/iiab/uuid"
 rm -f "$MOUNT_DIR/var/swap"
 touch "$MOUNT_DIR/.resize-rootfs"
 
-sudo "${NSPAWN_DIR}/shrink.sh" "$STATE_FILE" 200
+# Clean rootfs via nspawn (same as shrink.sh)
+systemd-nspawn -q -D "$MOUNT_DIR" --pipe /bin/bash -eux << 'CLEANEOF'
+apt clean
+rm -rf /var/cache/apt/archives/*.deb /var/lib/apt/lists/*
+rm -rf /var/cache/man/*
+rm -rf /var/cache/fontconfig/*
+rm -f /var/log/*log /var/log/*gz
+rm -f /etc/ssh/ssh_host_*
+rm -f /var/lib/NetworkManager/*.lease
+rm -f /var/log/nginx/*.log
+rm -rf /root/.cache/*
+rm -f /root/.bash_history
+journalctl --vacuum-time=1s
+CLEANEOF
 
+systemd-firstboot --root="$MOUNT_DIR" --timezone=UTC --force
+
+# Zero-fill free space for better compression
+echo "Zero-filling unused blocks..."
+(sh -c "cat /dev/zero > '$MOUNT_DIR/zero.fill'" 2>/dev/null || true)
+sync
+rm -f "$MOUNT_DIR/zero.fill"
+
+# Unmount
+echo "Unmounting..."
+umount "$MOUNT_DIR"
+rmdir "$MOUNT_DIR"
+sync
+
+# Shrink filesystem
+echo "Shrinking filesystem to minimal size..."
+e2fsck -p -f "$PARTDEV"
+resize2fs -M "$PARTDEV"
+
+# Calculate partition size with buffer
+ROOTFS_BLOCKSIZE=$(tune2fs -l "$PARTDEV" | grep "^Block size" | awk '{print $NF}')
+ROOTFS_BLOCKCOUNT=$(tune2fs -l "$PARTDEV" | grep "^Block count" | awk '{print $NF}')
+ROOTFS_PARTSIZE=$((ROOTFS_BLOCKCOUNT * ROOTFS_BLOCKSIZE))
+BUFFER_SIZE_MB=200
+BUFFER_SIZE=$((BUFFER_SIZE_MB * 1024 * 1024))
+TARGET_USER_SPACE=$((ROOTFS_PARTSIZE + BUFFER_SIZE))
+TOTAL_REQUIRED_SIZE=$(( (TARGET_USER_SPACE * 1011) / 1000 ))  # /0.99 ≈ *1.011
+
+PART_INFO=$(parted -m --script "$LOOPDEV" unit B print | grep "^1:")
+ROOTFS_PARTSTART=$(echo "$PART_INFO" | awk -F ":" '{print $2}' | tr -d 'B')
+ROOTFS_PARTNEWEND=$((ROOTFS_PARTSTART + TOTAL_REQUIRED_SIZE - 1))
+
+echo "Resizing partition from $(parted -m --script "$LOOPDEV" unit B print | grep "^1:" | awk -F: '{print $3}' | tr -d B) to ${ROOTFS_PARTNEWEND}..."
+(yes Yes | parted ---pretend-input-tty "$LOOPDEV" unit b resizepart 1 "$ROOTFS_PARTNEWEND" || true) >/dev/null 2>&1
+sync
+partprobe "$LOOPDEV" 2>/dev/null || true
+udevadm settle 2>/dev/null || sleep 2
+
+# Expand filesystem to fill new partition
+echo "Expanding filesystem to fill partition..."
+e2fsck -p -f "$PARTDEV" || true
+resize2fs "$PARTDEV" >/dev/null 2>&1
+tune2fs -m 1 "$PARTDEV" >/dev/null 2>&1
+
+# Detach loop device before truncation
+losetup --detach "$LOOPDEV"
+LOOPDEV=""
+
+# Get free space after partition and truncate
+PART_TYPE=$(blkid -o value -s PTTYPE "$WORK_IMG")
+FREE_SPACE=$(parted -m --script "$WORK_IMG" unit B print free | tail -1)
+
+if [[ "$FREE_SPACE" =~ "free" ]]; then
+    NEW_SIZE=$(echo "$FREE_SPACE" | awk -F ":" '{print $2}' | tr -d 'B')
+    if [[ "$PART_TYPE" == "gpt" ]]; then
+        NEW_SIZE=$((NEW_SIZE + 1048576))  # GPT backup header
+    fi
+
+    echo "Truncating image to $(( NEW_SIZE / 1024 / 1024 ))MB..."
+    truncate -s "$NEW_SIZE" "$WORK_IMG"
+
+    if [[ "$PART_TYPE" == "gpt" ]]; then
+        sgdisk -e "$WORK_IMG" >/dev/null 2>&1
+    fi
+fi
+
+echo "Image shrunk successfully ($(du -sm "$WORK_IMG" | cut -f1)MB)"
+
+###############################################################################
 # Step 5: Register the image
+###############################################################################
 echo ""
 echo "=== Step 5: Registering container image ==="
 
-IMG_FILE=$(basename "$STATE_FILE" .state)
-
-# For RAM demos, write directly to tmpfs to avoid disk I/O
+# For RAM demos, write directly to tmpfs
 if [ "$RAM_IMAGE" = "true" ]; then
     DEST="/run/iiab-ramfs/${NAME}.raw"
-    # Ensure the RAMFS directory exists
     if ! mountpoint -q "/run/iiab-ramfs" 2>/dev/null; then
         mkdir -p "/run/iiab-ramfs"
-        ram_size=$(( SIZE_MB * 11 / 10 ))  # 10% headroom
+        ram_size=$(( SIZE_MB * 11 / 10 ))
         echo "Mounting tmpfs at /run/iiab-ramfs (${ram_size}MB) for RAM build..."
         mount -t tmpfs -o "size=${ram_size}M,mode=0755" tmpfs "/run/iiab-ramfs"
     fi
 else
     DEST="/var/lib/machines/${NAME}.raw"
+    mkdir -p /var/lib/machines
 fi
 
-# Find the resulting image
-if [ -f "${NSPAWN_DIR}/${IMG_FILE}" ]; then
-    sudo mv "${NSPAWN_DIR}/${IMG_FILE}" "$DEST"
-elif [ -f "${NSPAWN_DIR}/${IMG_FILE}.img" ]; then
-    sudo mv "${NSPAWN_DIR}/${IMG_FILE}.img" "$DEST"
-else
-    echo "Warning: Could not find resulting image file" >&2
-    echo "Look in ${NSPAWN_DIR}/ for *.img files" >&2
-    exit 1
-fi
+mv "$WORK_IMG" "$DEST"
 
-# For RAM demos, create a symlink so systemd-nspawn can find the image
+# For RAM demos, create symlink so systemd-nspawn can find it
 if [ "$RAM_IMAGE" = "true" ]; then
     ln -sf "$DEST" "/var/lib/machines/${NAME}.raw"
-    # Clean up overlay state files from disk (they're no longer needed)
-    if [ -f "${NSPAWN_DIR}/${IMG_FILE}" ]; then
-        rm -f "${NSPAWN_DIR}/${IMG_FILE}"
-    fi
-    if [ -f "${NSPAWN_DIR}/${IMG_FILE}.img" ]; then
-        rm -f "${NSPAWN_DIR}/${IMG_FILE}.img"
-    fi
     echo ""
     echo "=========================================="
     echo "Build complete (RAM image)!"
@@ -323,3 +433,6 @@ else
     echo "Image: $DEST"
     echo "=========================================="
 fi
+
+# Clean up build directory
+rm -rf "$BUILD_DIR"
