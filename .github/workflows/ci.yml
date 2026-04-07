@@ -42,24 +42,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y systemd-container debootstrap parted jq e2fsprogs dosfstools psmisc iptables bridge-utils expect curl git
 
-      - name: Restore base image cache
-        id: cache-base-image
-        uses: actions/cache@v4
-        with:
-          path: base-image.raw
-          key: debian-13-base-image-v1
-
-      - name: Download base image
-        if: steps.cache-base-image.outputs.cache-hit != 'true'
-        run: |
-          curl -fL -o base-image.raw \
-            "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw"
-
-      - name: Prep base image
-        run: |
-          sudo mkdir -p /var/lib/iiab-demos
-          sudo cp base-image.raw /var/lib/iiab-demos/debian-13-generic-amd64.raw
-
       - name: Initialize host
         run: sudo ./democtl init
 
