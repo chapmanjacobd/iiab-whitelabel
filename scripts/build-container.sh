@@ -95,10 +95,14 @@ fi
 echo ""
 echo "=== Step 1: Preparing Debian base image ==="
 
+# For RAM demos, the base image is already loaded into tmpfs
 if [ -n "$IMAGE_SOURCE" ] && [ -f "$IMAGE_SOURCE" ]; then
     sudo "${NSPAWN_DIR}/mount.sh" "$IMAGE_SOURCE" "$SIZE_MB"
 elif [ -f "${NSPAWN_DIR}/debian-13-generic-amd64.img" ]; then
     sudo "${NSPAWN_DIR}/mount.sh" "${NSPAWN_DIR}/debian-13-generic-amd64.img" "$SIZE_MB"
+elif [ -f "/run/iiab-ramfs/base-image.raw" ]; then
+    echo "Using base image from RAM (tmpfs)..."
+    sudo "${NSPAWN_DIR}/mount.sh" "/run/iiab-ramfs/base-image.raw" "$SIZE_MB"
 else
     echo "Downloading Debian 13 generic amd64 image..."
     sudo "${NSPAWN_DIR}/mount.sh" \
@@ -271,7 +275,20 @@ echo ""
 echo "=== Step 5: Registering container image ==="
 
 IMG_FILE=$(basename "$STATE_FILE" .state)
-DEST="/var/lib/machines/${NAME}.raw"
+
+# For RAM demos, write directly to tmpfs to avoid disk I/O
+if [ "$RAM_IMAGE" = "true" ]; then
+    DEST="/run/iiab-ramfs/${NAME}.raw"
+    # Ensure the RAMFS directory exists
+    if ! mountpoint -q "/run/iiab-ramfs" 2>/dev/null; then
+        mkdir -p "/run/iiab-ramfs"
+        ram_size=$(( SIZE_MB * 11 / 10 ))  # 10% headroom
+        echo "Mounting tmpfs at /run/iiab-ramfs (${ram_size}MB) for RAM build..."
+        mount -t tmpfs -o "size=${ram_size}M,mode=0755" tmpfs "/run/iiab-ramfs"
+    fi
+else
+    DEST="/var/lib/machines/${NAME}.raw"
+fi
 
 # Find the resulting image
 if [ -f "${NSPAWN_DIR}/${IMG_FILE}" ]; then
@@ -284,8 +301,25 @@ else
     exit 1
 fi
 
-echo ""
-echo "=========================================="
-echo "Build complete!"
-echo "Image: $DEST"
-echo "=========================================="
+# For RAM demos, create a symlink so systemd-nspawn can find the image
+if [ "$RAM_IMAGE" = "true" ]; then
+    ln -sf "$DEST" "/var/lib/machines/${NAME}.raw"
+    # Clean up overlay state files from disk (they're no longer needed)
+    if [ -f "${NSPAWN_DIR}/${IMG_FILE}" ]; then
+        rm -f "${NSPAWN_DIR}/${IMG_FILE}"
+    fi
+    if [ -f "${NSPAWN_DIR}/${IMG_FILE}.img" ]; then
+        rm -f "${NSPAWN_DIR}/${IMG_FILE}.img"
+    fi
+    echo ""
+    echo "=========================================="
+    echo "Build complete (RAM image)!"
+    echo "Image: $DEST (symlinked to /var/lib/machines/${NAME}.raw)"
+    echo "=========================================="
+else
+    echo ""
+    echo "=========================================="
+    echo "Build complete!"
+    echo "Image: $DEST"
+    echo "=========================================="
+fi

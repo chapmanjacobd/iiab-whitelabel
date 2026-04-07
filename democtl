@@ -250,6 +250,7 @@ check_resources() {
     load_resources
 
     # All demos need disk space for the shared base image (downloaded once, reused)
+    # RAM demos build in RAM so only need disk for the base image download (if not already in RAM)
     local disk_avail
     disk_avail=$(df -m /var/lib/machines 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
     local base_disk_needed=$(( DISK_BASE + 500 ))  # base image + small overhead
@@ -261,11 +262,12 @@ check_resources() {
     fi
 
     if $ram_image; then
-        # RAM-image demos build entirely in RAM — only the base image uses disk (shared)
+        # RAM-image demos build entirely in RAM — check for enough RAM for base + demo image
         local ram_avail=$(( RAM_TOTAL - RAM_ALLOCATED - RAM_BUFFER ))
-        if [ "$size_mb" -gt "$ram_avail" ]; then
+        local ram_needed=$(( size_mb + RAM_BUFFER ))
+        if [ "$ram_needed" -gt "$ram_avail" ]; then
             echo "Error: Insufficient RAM for demo '$name'." >&2
-            echo "  Need: ~$(( size_mb + RAM_BUFFER ))MB" >&2
+            echo "  Need: ~${ram_needed}MB (demo: ${size_mb}MB + buffer)" >&2
             echo "  Available: ${ram_avail}MB (${RAM_TOTAL}MB total - ${RAM_ALLOCATED}MB allocated - ${RAM_BUFFER}MB buffer)" >&2
             echo "" >&2
             echo "  Options:" >&2
@@ -625,8 +627,33 @@ build_demo() {
         "--nspawn-dir" "$NSPAWN_DIR"
     )
 
+    # For RAM demos: load base image into RAM first, then build from RAM
     if [ "$RAM_IMAGE" = "true" ]; then
         build_args+=("--ram-image")
+
+        # Check if base image is already in RAM
+        if [ ! -f "/run/iiab-ramfs/base-image.raw" ]; then
+            # Find the base image to load into RAM
+            local base_image=""
+            if [ -f "${NSPAWN_DIR}/debian-13-generic-amd64.img" ]; then
+                base_image="${NSPAWN_DIR}/debian-13-generic-amd64.img"
+            fi
+
+            if [ -n "$base_image" ]; then
+                log_demo "$name" "Loading base image into RAM for build..."
+                if ! bash "$SCRIPT_DIR/ramfs-setup.sh" base-image "$base_image" >> "$demo_dir/build.log" 2>&1; then
+                    log_demo "$name" "Warning: Failed to load base image into RAM, will use disk"
+                else
+                    # Tell build script to use RAM-based base image
+                    build_args+=("--image-source" "/run/iiab-ramfs/base-image.raw")
+                fi
+            else
+                log_demo "$name" "Warning: Base image not found on disk, will download during build"
+            fi
+        else
+            log_demo "$name" "Base image already in RAM, using for build..."
+            build_args+=("--image-source" "/run/iiab-ramfs/base-image.raw")
+        fi
     fi
 
     if [ -n "$LOCAL_VARS" ]; then
@@ -643,13 +670,20 @@ build_demo() {
         return 1
     fi
 
-    # Load RAM image if needed
+    # Load RAM image if needed (only for RAM demos where the build wrote to disk)
     if [ "$RAM_IMAGE" = "true" ] && [ -f "$SCRIPT_DIR/ramfs-setup.sh" ]; then
-        log_demo "$name" "Loading image into RAM..."
-        if ! bash "$SCRIPT_DIR/ramfs-setup.sh" load "$name" >> "$demo_dir/build.log" 2>&1; then
-            log_demo "$name" "Warning: Failed to load image into RAM, using disk"
-        else
-            log_demo "$name" "Image loaded into RAM"
+        # If the build already wrote the image to RAM (via --image-source from RAM),
+        # the image is already at /run/iiab-ramfs/${name}.raw with a symlink at /var/lib/machines
+        if [ ! -f "/run/iiab-ramfs/${name}.raw" ] && [ -f "/var/lib/machines/${name}.raw" ]; then
+            # Fallback: build wrote to disk, now copy to RAM
+            log_demo "$name" "Loading built image into RAM..."
+            if ! bash "$SCRIPT_DIR/ramfs-setup.sh" load "$name" >> "$demo_dir/build.log" 2>&1; then
+                log_demo "$name" "Warning: Failed to load image into RAM, using disk"
+            else
+                log_demo "$name" "Image loaded into RAM"
+            fi
+        elif [ -f "/run/iiab-ramfs/${name}.raw" ]; then
+            log_demo "$name" "Image already in RAM (built from RAM base)"
         fi
     fi
 
@@ -761,6 +795,22 @@ cmd_remove() {
     # Remove image and symlinks
     rm -f "/var/lib/machines/${name}.raw"
     rm -f "/run/iiab-ramfs/${name}.raw"
+
+    # Clean up base image from RAM if no other RAM demos remain
+    if [ -f "/run/iiab-ramfs/base-image.raw" ]; then
+        local ram_demos_remaining=false
+        for other_dir in "$ACTIVE_DIR"/*/; do
+            [ -d "$other_dir" ] || continue
+            [ "$(basename "$other_dir")" = "$name" ] && continue
+            if grep -q '^RAM_IMAGE=true$' "$other_dir/config" 2>/dev/null; then
+                ram_demos_remaining=true
+                break
+            fi
+        done
+        if ! $ram_demos_remaining; then
+            rm -f "/run/iiab-ramfs/base-image.raw"
+        fi
+    fi
 
     # Remove .nspawn config
     rm -f "/etc/systemd/nspawn/${name}.nspawn"
