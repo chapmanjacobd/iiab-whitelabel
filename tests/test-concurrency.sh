@@ -241,8 +241,7 @@ DISK_TOTAL=50000
 RAM_TOTAL=2048
 EOF
 
-check_resources "test-demo" 10000 true
-RESOURCE_CHECK=$?
+RESOURCE_CHECK=$(check_resources "test-demo" 10000 true 2>/dev/null && echo 0 || echo 1)
 
 assert_equals "1" "$RESOURCE_CHECK" "Insufficient RAM detected correctly"
 
@@ -257,8 +256,7 @@ DISK_TOTAL=50000
 RAM_TOTAL=16384
 EOF
 
-check_resources "test-demo" 2000 true
-RESOURCE_CHECK_OK=$?
+RESOURCE_CHECK_OK=$(check_resources "test-demo" 2000 true && echo 0 || echo 1)
 
 assert_equals "0" "$RESOURCE_CHECK_OK" "Sufficient RAM validated"
 
@@ -279,24 +277,17 @@ _validate_name() {
     return 0
 }
 
-_validate_name "valid-name"
-VALID1=$?
-_validate_name "valid_name"
-VALID2=$?
-_validate_name "valid123"
-VALID3=$?
+VALID1=$(_validate_name "valid-name" && echo 0 || echo 1)
+VALID2=$(_validate_name "valid_name" && echo 0 || echo 1)
+VALID3=$(_validate_name "valid123" && echo 0 || echo 1)
 
 # Invalid names
-_validate_name "invalid/name"
-INVALID1=$?
-_validate_name "invalid.name"
-INVALID2=$?
-_validate_name "invalid name"
-INVALID3=$?
+INVALID1=$(_validate_name "invalid/name" && echo 0 || echo 1)
+INVALID2=$(_validate_name "invalid.name" && echo 0 || echo 1)
+INVALID3=$(_validate_name "invalid name" && echo 0 || echo 1)
 
 # Long name (> 64 chars)
-_validate_name "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-LONG_NAME=$?
+LONG_NAME=$(_validate_name "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" && echo 0 || echo 1)
 
 assert_equals "0" "$VALID1" "Name with hyphen valid"
 assert_equals "0" "$VALID2" "Name with underscore valid"
