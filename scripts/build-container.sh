@@ -483,7 +483,9 @@ expect <<'EXPECT_EOF' >/dev/null 2>&1 || true
 set timeout 180
 spawn parted ---pretend-input-tty $env(PARTED_DEVICE) unit b resizepart 1 $env(PARTED_NEW_END)
 expect {
-    -re "(?i)fix" { send "Fix\r"; exp_continue }
+    # When shrinking, parted may offer to "fix" GPT to use ALL remaining space.
+    # We want to Ignore that and keep our resize target.
+    -re "(?i)fix" { send "Ignore\r"; exp_continue }
     -re "(?i)continue" { send "Yes\r"; exp_continue }
     eof
 }

@@ -66,7 +66,9 @@ fi
 fallback_domain="large.iiab.io"
 for name in "${demo_names[@]}"; do
     if [ "$(_demo_config_value WILDCARD "$ACTIVE_DIR/$name/config")" = "true" ]; then
-        fallback_domain="$(sanitize_subdomain "$(_demo_config_value SUBDOMAIN "$ACTIVE_DIR/$name/config" || echo "$name")").iiab.io"
+        _sd=$(_demo_config_value SUBDOMAIN "$ACTIVE_DIR/$name/config")
+        fallback_domain="$(sanitize_subdomain "${_sd:-$name}").iiab.io"
+        unset _sd
         break
     fi
 done

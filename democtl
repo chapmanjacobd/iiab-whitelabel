@@ -68,13 +68,11 @@ acquire_lock() {
     eval "exec $LOCK_FD>>$LOCK_FILE"
 
     if [ "$timeout" = "0" ]; then
-        if ! flock -n "$LOCK_FD"; then
-            # Attempt stale PID cleanup
-            if _try_clean_stale_pid; then
-                if flock -n "$LOCK_FD"; then
-                    break  # Lock acquired after cleanup
-                fi
-            fi
+        if flock -n "$LOCK_FD"; then
+            : # Lock acquired on first try
+        elif _try_clean_stale_pid && flock -n "$LOCK_FD"; then
+            : # Lock acquired after stale PID cleanup
+        else
             echo "Error: another democtl operation is in progress (lock held)." >&2
             return 1
         fi
