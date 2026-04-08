@@ -79,8 +79,14 @@ load_image() {
     local avail_mb
     avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
     # Keeping the 512MB RAM safety buffer as requested
-    if [ "$img_size_mb" -gt "$((avail_mb - 512))" ]; then
-        echo "Error: Not enough RAM available (${avail_mb}MB, need ~${img_size_mb}MB)" >&2
+    local buffer=512
+    if [ "$avail_mb" -lt "$buffer" ]; then
+        echo "Error: Not enough RAM available (${avail_mb}MB, need at least ${buffer}MB buffer + image)" >&2
+        exit 1
+    fi
+    local ram_for_image=$(( avail_mb - buffer ))
+    if [ "$img_size_mb" -gt "$ram_for_image" ]; then
+        echo "Error: Not enough RAM available (${avail_mb}MB, need ~${img_size_mb}MB + ${buffer}MB buffer)" >&2
         exit 1
     fi
 

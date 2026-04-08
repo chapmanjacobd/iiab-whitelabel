@@ -31,44 +31,44 @@ source "$SCRIPT_DIR/lib-iiab.sh"
 LOCK_FILE="$STATE_DIR/.democtl.lock"
 LOCK_FD=200
 
+# Stale lock detection — verify the lock-holding process is actually a democtl
+_try_clean_stale_lock() {
+    if [ -f "$LOCK_FILE" ]; then
+        local stale_pid=""
+        stale_pid=$(cat "$LOCK_FILE.pid" 2>/dev/null || echo "")
+        if [ -n "$stale_pid" ] && [ "$stale_pid" -gt 1 ] 2>/dev/null; then
+            # Check if process exists
+            if ! kill -0 "$stale_pid" 2>/dev/null; then
+                echo "Warning: Lock held by dead PID $stale_pid, removing stale lock" >&2
+                rm -f "$LOCK_FILE" "$LOCK_FILE.pid"
+                return 0  # Caller should retry
+            fi
+            # Process exists — verify it's actually a democtl process (avoid PID reuse false positives)
+            local cmdline=""
+            cmdline=$(tr '\0' ' ' < "/proc/$stale_pid/cmdline" 2>/dev/null || echo "")
+            if [ -n "$cmdline" ] && ! echo "$cmdline" | grep -q 'democtl'; then
+                # Process exists but is NOT democtl — likely PID reuse, treat as stale
+                local lock_age
+                lock_age=$(( $(date +%s) - $(stat -c%Y "$LOCK_FILE" 2>/dev/null || date +%s) ))
+                if [ "$lock_age" -gt 300 ]; then  # Only override if lock is > 5 min old
+                    # Random sleep to avoid race conditions when multiple processes try to clean the same lock
+                    sleep 0.$(( RANDOM % 10 ))
+                    [ -f "$LOCK_FILE" ] || return 0
+                    echo "Warning: Lock held by non-democtl PID $stale_pid (age: ${lock_age}s), removing stale lock" >&2
+                    rm -f "$LOCK_FILE" "$LOCK_FILE.pid"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+    return 1  # No stale lock or process still alive (and is democtl)
+}
+
 # Acquire an exclusive lock. Non-blocking by default — errors out immediately
 # if the lock is held, so concurrent adds fail cleanly instead of racing.
 acquire_lock() {
     local timeout="${1:--1}"  # -1 = wait forever, 0 = non-blocking
     eval "exec $LOCK_FD>$LOCK_FILE"
-
-    # Stale lock detection: verify the lock-holding process is actually a democtl
-    _try_clean_stale_lock() {
-        if [ -f "$LOCK_FILE" ]; then
-            local stale_pid=""
-            stale_pid=$(cat "$LOCK_FILE.pid" 2>/dev/null || echo "")
-            if [ -n "$stale_pid" ] && [ "$stale_pid" -gt 1 ] 2>/dev/null; then
-                # Check if process exists
-                if ! kill -0 "$stale_pid" 2>/dev/null; then
-                    echo "Warning: Lock held by dead PID $stale_pid, removing stale lock" >&2
-                    rm -f "$LOCK_FILE" "$LOCK_FILE.pid"
-                    return 0  # Caller should retry
-                fi
-                # Process exists — verify it's actually a democtl process (avoid PID reuse false positives)
-                local cmdline=""
-                cmdline=$(tr '\0' ' ' < "/proc/$stale_pid/cmdline" 2>/dev/null || echo "")
-                if [ -n "$cmdline" ] && ! echo "$cmdline" | grep -q 'democtl'; then
-                    # Process exists but is NOT democtl — likely PID reuse, treat as stale
-                    local lock_age
-                    lock_age=$(( $(date +%s) - $(stat -c%Y "$LOCK_FILE" 2>/dev/null || date +%s) ))
-                    if [ "$lock_age" -gt 300 ]; then  # Only override if lock is > 5 min old
-                        # Random sleep to avoid race conditions when multiple processes try to clean the same lock
-                        sleep 0.$(( RANDOM % 10 ))
-                        [ -f "$LOCK_FILE" ] || return 0
-                        echo "Warning: Lock held by non-democtl PID $stale_pid (age: ${lock_age}s), removing stale lock" >&2
-                        rm -f "$LOCK_FILE" "$LOCK_FILE.pid"
-                        return 0
-                    fi
-                fi
-            fi
-        fi
-        return 1  # No stale lock or process still alive (and is democtl)
-    }
 
     if [ "$timeout" = "0" ]; then
         if ! flock -n "$LOCK_FD"; then
@@ -758,7 +758,7 @@ cmd_rebuild() {
     cmd_remove "$name"
 
     # Re-add with saved config
-    echo "$saved_config" | while IFS='=' read -r key value; do
+    while IFS='=' read -r key value; do
         case "$key" in
             IIAB_BRANCH)   branch="$value" ;;
             IIAB_REPO)     repo="$value" ;;
@@ -771,7 +771,7 @@ cmd_rebuild() {
             WILDCARD)      wildcard=$value ;;
             DESCRIPTION)   description="$value" ;;
         esac
-    done
+    done <<< "$saved_config"
 
     local add_args=("$name")
     [ -n "${branch:-}" ] && add_args+=("--branch" "$branch")
@@ -973,6 +973,89 @@ cmd_shell() {
 
     # Use systemd-run for shell, as machinectl shell is essentially a wrapper around it
     systemd-run -it --machine="$name" /bin/bash
+}
+
+###############################################################################
+# democtl settle — wait until all demos are running or failed
+###############################################################################
+cmd_settle() {
+    ensure_root "$@"
+    local timeout="${1:-3600}"  # Default: wait up to 60 minutes
+    ensure_state_dirs
+
+    echo "=== Waiting for all demos to reach running/failed state ==="
+    echo "  Timeout: ${timeout}s"
+
+    local start_time
+    start_time=$(date +%s)
+    local poll_interval=10
+
+    while true; do
+        local now
+        now=$(date +%s)
+        local elapsed=$(( now - start_time ))
+
+        if [ "$elapsed" -ge "$timeout" ]; then
+            echo ""
+            echo "Error: Timed out after ${timeout}s waiting for demos to settle." >&2
+            echo "  Some demos may still be building or hung. Check with: democtl list" >&2
+            return 1
+        fi
+
+        local all_settled=true
+        local pending=()
+        local building=()
+        local failed=()
+        local running=0
+
+        for demo_dir in "$ACTIVE_DIR"/*/; do
+            [ -d "$demo_dir" ] || continue
+            local name
+            name=$(basename "$demo_dir")
+            local status
+            status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+
+            case "$status" in
+                running)
+                    running=$((running + 1))
+                    ;;
+                failed)
+                    failed+=("$name")
+                    ;;
+                building|pending)
+                    all_settled=false
+                    building+=("$name")
+                    ;;
+                *)
+                    all_settled=false
+                    pending+=("$name")
+                    ;;
+            esac
+        done
+
+        # Show progress
+        local total=$(( running + ${#building[@]} + ${#pending[@]} + ${#failed[@]} ))
+        if [ "$total" -eq 0 ]; then
+            echo "No demos found. Nothing to settle."
+            return 0
+        fi
+
+        echo -ne "\r  Running: $running | Building: ${#building[@]} | Pending: ${#pending[@]} | Failed: ${#failed[@]} | Elapsed: ${elapsed}s  "
+
+        if $all_settled; then
+            echo ""
+            echo ""
+            echo "All demos have settled."
+            echo "  Running: $running"
+            if [ ${#failed[@]} -gt 0 ]; then
+                echo "  Failed: ${failed[*]}"
+                return 1
+            fi
+            return 0
+        fi
+
+        sleep "$poll_interval"
+    done
 }
 
 ###############################################################################
@@ -1208,6 +1291,7 @@ Commands:
   reboot <name>                 Restart a running demo
   reload                        Regenerate nginx config from active demos
   ramfs <action> [name]         Manage RAM-loaded images (load/unload/status/cleanup)
+  settle [timeout]              Wait until all demos are running or failed (default: 60min)
   reconcile                     Fix resource counter drift and check ghost IPs
 
 Add flags:
@@ -1256,6 +1340,7 @@ main() {
         reboot)    cmd_reboot "$@" ;;
         reload)    cmd_reload "$@" ;;
         ramfs)     cmd_ramfs "$@" ;;
+        settle)    cmd_settle "$@" ;;
         reconcile) cmd_reconcile "$@" ;;
         help|--help|-h) cmd_help ;;
         *)

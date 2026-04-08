@@ -62,14 +62,15 @@ sanitize_subdomain() {
 setup_iptables_nat() {
     local ext_if="${1:?Error: external interface required}"
 
-    if ! iptables -t nat -C POSTROUTING -o "$ext_if" -j MASQUERADE 2>/dev/null; then
+    # Use iptables-save for idempotency since -C doesn't support wildcards like ve-+
+    if ! iptables-save -t nat | grep -q "\-o $ext_if.*MASQUERADE" 2>/dev/null; then
         echo "Adding NAT masquerade for $ext_if..."
         iptables -t nat -A POSTROUTING -o "$ext_if" -j MASQUERADE
     else
         echo "NAT masquerade already configured"
     fi
 
-    if ! iptables -C FORWARD -i ve-+ -o "$ext_if" -j ACCEPT 2>/dev/null; then
+    if ! iptables-save | grep -q "\-i ve-+.*-o $ext_if.*ACCEPT" 2>/dev/null; then
         echo "Adding container forwarding rules..."
         iptables -A FORWARD -i ve-+ -o "$ext_if" -j ACCEPT
         iptables -A FORWARD -i "$ext_if" -o ve-+ -m state --state RELATED,ESTABLISHED -j ACCEPT
@@ -95,21 +96,22 @@ add_container_isolation() {
     local bridge="iiab-br0"
     local host_ip="10.0.3.1"
 
+    # Use iptables-save for idempotency since -C doesn't support wildcards like ve-+
     # Allow container(s) to reach the host (nginx reverse proxy)
-    if ! iptables -C FORWARD -i "ve-+" -o "$bridge" -d "$host_ip" -j ACCEPT 2>/dev/null; then
+    if ! iptables-save | grep -q "\-i ve-+.*-o $bridge.*-d $host_ip.*ACCEPT" 2>/dev/null; then
         echo "Adding container-to-host forward rule..."
         iptables -A FORWARD -i "ve-+" -o "$bridge" -d "$host_ip" -j ACCEPT
     fi
 
     # Allow established return traffic from host to containers
-    if ! iptables -C FORWARD -i "$bridge" -o "ve-+" -s "$host_ip" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+    if ! iptables-save | grep -q "\-i $bridge.*-o ve-+.*-s $host_ip.*RELATED,ESTABLISHED.*ACCEPT" 2>/dev/null; then
         echo "Adding host-to-container established rule..."
         iptables -A FORWARD -i "$bridge" -o "ve-+" -s "$host_ip" -m state --state RELATED,ESTABLISHED -j ACCEPT
     fi
 
     # Block all container-to-container traffic on the bridge
     # Must be AFTER the allow rules above, so container→host still works
-    if ! iptables -C FORWARD -i "ve-+" -o "ve-+" -j DROP 2>/dev/null; then
+    if ! iptables-save | grep -q "\-i ve-+.*-o ve-+.*DROP" 2>/dev/null; then
         echo "Adding container-to-container isolation rule..."
         iptables -A FORWARD -i "ve-+" -o "ve-+" -j DROP
     fi

@@ -135,8 +135,6 @@ fi
 echo ""
 echo "=== Regenerating nginx config with SSL ==="
 
-# This assumes nginx-gen.sh is available
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NGINX_GEN="$SCRIPT_DIR/nginx-gen.sh"
 
 if [ -x "$NGINX_GEN" ]; then

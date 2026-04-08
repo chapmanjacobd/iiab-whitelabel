@@ -7,10 +7,11 @@
 help:
 	bash democtl help
 
-# Full one-time setup: init → add demos → obtain SSL certs
+# Full one-time setup: init → add demos → wait for builds → obtain SSL certs
 install:
 	bash democtl init
 	make small medium large
+	bash democtl settle
 	bash scripts/certbot-setup.sh
 
 # Host bootstrap (packages, network, nginx)

@@ -97,6 +97,7 @@ BRIDGE_NETDEV="/etc/systemd/network/iiab-br0.netdev"
 BRIDGE_NETWORK="/etc/systemd/network/iiab-br0.network"
 
 # Create netdev file
+netdev_changed=false
 if [ ! -f "$BRIDGE_NETDEV" ]; then
     echo "Creating bridge netdev config..."
     cat > "$BRIDGE_NETDEV" << 'EOF'
@@ -113,11 +114,13 @@ Address=10.0.3.1/24
 IPForward=yes
 IPMasquerade=yes
 EOF
+    netdev_changed=true
 else
     echo "Bridge netdev config already exists"
 fi
 
 # Create network file
+network_changed=false
 if [ ! -f "$BRIDGE_NETWORK" ]; then
     echo "Creating bridge network config..."
     cat > "$BRIDGE_NETWORK" << 'EOF'
@@ -129,12 +132,18 @@ Address=10.0.3.1/24
 IPForward=yes
 IPMasquerade=yes
 EOF
+    network_changed=true
 else
     echo "Bridge network config already exists"
 fi
 
-# Restart systemd-networkd if configs changed
-systemctl restart systemd-networkd
+# Restart systemd-networkd only if configs were changed
+if $netdev_changed || $network_changed; then
+    echo "Restarting systemd-networkd to apply bridge config..."
+    systemctl restart systemd-networkd
+else
+    echo "Bridge config unchanged, skipping systemd-networkd restart"
+fi
 
 ###############################################################################
 # 5. Deploy nginx configuration (idempotent)
