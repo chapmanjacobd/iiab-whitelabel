@@ -320,7 +320,7 @@ if $SKIP_INSTALL; then
     expect << 'EXPECT_EOF'
 set timeout 60
 
-spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=replace-uplink -D $env(MOUNT_DIR) -M box --boot
+spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=replace-static -D $env(MOUNT_DIR) -M box --boot
 
 expect "login: " { send "root\r" }
 expect -re {#\s?$} { send "ssh-keygen -A\r" }
@@ -360,7 +360,7 @@ EOF_SCRIPT
     expect << 'EXPECT_EOF'
 set timeout 7200
 
-spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=replace-uplink -D $env(MOUNT_DIR) -M box --boot
+spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=replace-static -D $env(MOUNT_DIR) -M box --boot
 
 expect "login: " { send "root\r" }
 expect -re {#\s?$} { send "export PAGER=cat SYSTEMD_PAGER=cat\r" }
