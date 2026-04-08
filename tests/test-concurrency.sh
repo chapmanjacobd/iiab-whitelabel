@@ -15,13 +15,16 @@ TOTAL=0
 ###############################################################################
 
 setup_test_env() {
-    # Create isolated test state directory
+    # Clean and create isolated test state directory
+    rm -rf "$TEST_STATE_DIR"
     mkdir -p "$TEST_STATE_DIR/active" "$TEST_STATE_DIR/locks"
     export STATE_DIR="$TEST_STATE_DIR"
     export ACTIVE_DIR="$TEST_STATE_DIR/active"
     export RESOURCE_FILE="$TEST_STATE_DIR/resources"
     export LOCK_FILE="$TEST_STATE_DIR/.democtl.lock"
-    
+    export RAM_ALLOCATED=0
+    export DISK_ALLOCATED=0
+
     # Initialize resource file
     cat > "$RESOURCE_FILE" << EOF
 DISK_TOTAL=50000
@@ -356,7 +359,7 @@ SUBDOMAIN5=$(sanitize_subdomain "!!!")
 
 assert_equals "mydemo-test" "$SUBDOMAIN1" "Uppercase converted to lowercase"
 assert_equals "mydemotest" "$SUBDOMAIN2" "Dots removed"
-assert_equals "demo_test-123" "$SUBDOMAIN3" "Underscores and hyphens preserved"
+assert_equals "demotest-123" "$SUBDOMAIN3" "Underscores removed, hyphens preserved"
 assert_equals "demo" "$SUBDOMAIN4" "Leading/trailing hyphens removed"
 assert_equals "demo" "$SUBDOMAIN5" "Invalid chars fallback to 'demo'"
 
