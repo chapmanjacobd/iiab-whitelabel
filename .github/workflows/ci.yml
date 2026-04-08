@@ -77,7 +77,7 @@ jobs:
 
       - name: Build unittest demo
         run: |
-          sudo ./democtl add unittest \
+          sudo ./democtl build unittest --start \
             --size 4000 \
             --local-vars vars/local_vars_unittest.yml \
             --fg --repo github.com/chapmanjacobd/iiab --branch rpi_image/genericvm
