@@ -160,11 +160,18 @@ add_container_isolation() {
     local subnet="${IIAB_DEMO_SUBNET}"
     local bridge="${IIAB_BRIDGE}"
 
-    # Docker sets FORWARD policy DROP; ensure IIAB bridge is allowed (idempotent)
-    if iptables-save -t filter 2>/dev/null | grep -q "^:FORWARD DROP"; then
-        iptables -C FORWARD -i "$bridge" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "$bridge" -j ACCEPT 2>/dev/null || true
-        iptables -C FORWARD -o "$bridge" -j ACCEPT 2>/dev/null || iptables -I FORWARD 2 -o "$bridge" -j ACCEPT 2>/dev/null || true
-    fi
+    # Docker sets FORWARD policy DROP in its ip filter chain.
+    # Insert ACCEPT rules directly via nft into the ip filter table (idempotent).
+    nft add table ip filter 2>/dev/null || true
+    # Clean stale rules for our bridge
+    local handles
+    handles=$(nft --handle list chain ip filter FORWARD 2>/dev/null | grep "$bridge" | grep -oP 'handle \K[0-9]+' || true)
+    for h in $handles; do
+        nft delete rule ip filter FORWARD "$h" 2>/dev/null || true
+    done
+    # Insert at top of chain
+    nft insert rule ip filter FORWARD iifname "$bridge" accept 2>/dev/null || true
+    nft insert rule ip filter FORWARD oifname "$bridge" accept 2>/dev/null || true
 
     # 1. L3 (inet) rules for Host/Internet access
     nft add table inet iiab 2>/dev/null || true
