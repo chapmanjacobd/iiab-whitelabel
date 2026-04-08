@@ -123,11 +123,11 @@ fi
 LOOPDEV=""
 cleanup() {
     if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
-        echo "Warning: Mount still active at $MOUNT_DIR — cleaning up" >&2
+        echo "Warning: Mount still active at $MOUNT_DIR -- cleaning up" >&2
         umount -l "$MOUNT_DIR" 2>/dev/null || true
     fi
     if [ -n "$LOOPDEV" ] && losetup "$LOOPDEV" &>/dev/null; then
-        echo "Warning: Loop device $LOOPDEV still attached — detaching" >&2
+        echo "Warning: Loop device $LOOPDEV still attached -- detaching" >&2
         losetup --detach "$LOOPDEV" 2>/dev/null || true
     fi
     # For non-RAM builds from RAM, clean up only our own build tmpfs
@@ -211,17 +211,31 @@ if [[ "$IIAB_BRANCH" == refs/pull/* ]]; then
         git fetch --depth 1 "$IIAB_REPO" "$IIAB_BRANCH" && \
         git checkout FETCH_HEAD)
 else
-    git clone --depth 1 --branch "$IIAB_BRANCH" "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab" || \
-        git clone --depth 1 "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"
+    if ! git clone --depth 1 --branch "$IIAB_BRANCH" "$IIAB_REPO" "$MOUNT_DIR/opt/iiab/iiab"; then
+        echo "Error: Failed to clone IIAB repo branch '$IIAB_BRANCH' from $IIAB_REPO" >&2
+        exit 1
+    fi
 fi
 
 # Resolve local_vars path
-if [[ "$LOCAL_VARS" != /* ]] && [ -n "$LOCAL_VARS" ]; then
-    IIAB_VARS_PATH="$LOCAL_VARS"
+# Priority: (1) relative path from host cwd → copy into image, (2) path inside IIAB repo
+if [ -n "$LOCAL_VARS" ]; then
+    if [[ "$LOCAL_VARS" != /* ]] && [ -f "$LOCAL_VARS" ]; then
+        # Relative path exists on host -- copy into the IIAB repo inside the image
+        RELATIVE_VARS_DIR=$(dirname "$LOCAL_VARS")
+        mkdir -p "$MOUNT_DIR/opt/iiab/iiab/$RELATIVE_VARS_DIR"
+        cp --preserve=mode,timestamps "$LOCAL_VARS" "$MOUNT_DIR/opt/iiab/iiab/$LOCAL_VARS"
+        IIAB_VARS_PATH="$LOCAL_VARS"
+        echo "Copied local_vars from host: $LOCAL_VARS → IIAB repo in image"
+    elif [[ "$LOCAL_VARS" != /* ]]; then
+        # Relative path but file not on host -- assume it's relative to IIAB repo root
+        IIAB_VARS_PATH="$LOCAL_VARS"
+    elif [[ "$LOCAL_VARS" == /* ]]; then
+        # Absolute path -- handled later by host-path fallback
+        IIAB_VARS_PATH=""
+    fi
 elif [ -z "$LOCAL_VARS" ]; then
     IIAB_VARS_PATH="vars/local_vars_${NAME}.yml"
-else
-    IIAB_VARS_PATH=""
 fi
 
 # Install IIAB configuration
@@ -270,7 +284,7 @@ Name=ve-* host-* eth0
 
 [Network]
 Address=$IP/24
-Gateway=10.0.3.1
+Gateway=$IIAB_GW
 DNS=8.8.8.8
 DNS=1.1.1.1
 EOF
@@ -497,7 +511,7 @@ echo "=== Step 5: Registering container image ==="
 mkdir -p /var/lib/machines
 
 if $RAM_IMAGE; then
-    # Keep image in RAM — mount /run/iiab-ramfs if needed
+    # Keep image in RAM -- mount /run/iiab-ramfs if needed
     if ! mountpoint -q "/run/iiab-ramfs" 2>/dev/null; then
         mkdir -p "/run/iiab-ramfs"
         ram_size=$(( SIZE_MB * 11 / 10 ))

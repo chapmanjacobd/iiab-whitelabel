@@ -3,15 +3,21 @@
 # Usage:
 #   container-service.sh <name> <ip> [--volatile=MODE] [--ram-image]
 #
-# --volatile=MODE  Controls systemd's Volatile= setting:
-#   no      — Persistent rootfs. All changes survive restarts.
-#   overlay — Overlayfs with tmpfs upper. Changes discarded on stop. Works with any rootfs.
-#   state   — Volatile /etc and /usr, persistent /var. Requires bootable /usr-only system.
-#   yes     — Full volatile rootfs. Everything resets on boot. Requires bootable /usr-only system.
+# --volatile=MODE  Controls the Volatile= setting:
+#   no      -- Persistent rootfs. All changes survive restarts.
+#   overlay -- Overlayfs with tmpfs upper. Changes discarded on stop. Works with any rootfs.
+#   state   -- Volatile /etc and /usr, persistent /var. Requires bootable /usr-only system.
+#   yes     -- Full volatile rootfs. Everything resets on boot. Requires bootable /usr-only system.
+#
+# Default (from democtl): overlay
 #
 # --ram-image  Image is loaded into host tmpfs. Container boots from RAM,
 #              never reads from disk after initial copy.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib-iiab.sh disable=SC1091
+source "$SCRIPT_DIR/lib-iiab.sh"
 
 NAME="${1:?Error: container name required}"
 IP="${2:?Error: IP address required}"
@@ -58,7 +64,7 @@ NoNewPrivileges=yes
 
 [Network]
 VirtualEthernet=yes
-Bridge=iiab-br0
+Bridge=${IIAB_BRIDGE}
 
 [Files]
 ${FILES_SECTION}

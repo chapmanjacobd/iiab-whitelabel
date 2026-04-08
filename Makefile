@@ -18,7 +18,7 @@ install:
 init:
 	bash democtl init
 
-# Convenience targets — add a single demo
+# Convenience targets -- add a single demo
 small:
 	bash democtl add small \
 		--size 12000 \

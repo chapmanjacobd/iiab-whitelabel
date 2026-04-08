@@ -9,21 +9,20 @@ set -euo pipefail
 STATE_DIR="/var/lib/iiab-demos"
 ACTIVE_DIR="$STATE_DIR/active"
 RESOURCE_FILE="$STATE_DIR/resources"
-DEMO_SUBNET="10.0.3.0/24"
-# shellcheck disable=SC2034  # Used for documentation/reference
-DEMO_GW="10.0.3.1"
-SUBNET_BASE="10.0.3"
-# shellcheck disable=SC2034  # Reserved for future use / external scripts
-BRIDGE="iiab-br0"
-
-# Resource allocation constants
-RAM_BUFFER=512    # Extra MB buffer per build (RAM or ram-image) for container runtime
-DISK_BASE=0       # No extra disk headroom; use requested size exactly
+# Network config is defined in scripts/lib-iiab.sh (IIAB_DEMO_SUBNET, IIAB_SUBNET_BASE, etc.)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
 
 # shellcheck source=scripts/lib-iiab.sh disable=SC1091
 source "$SCRIPT_DIR/lib-iiab.sh"
+
+# Alias for backward compatibility within this script
+DEMO_SUBNET="$IIAB_DEMO_SUBNET"
+SUBNET_BASE="$IIAB_SUBNET_BASE"
+
+# Resource allocation constants
+RAM_BUFFER=512    # Extra MB buffer per build (RAM or ram-image) for container runtime
+DISK_BASE=0       # No extra disk headroom; use requested size exactly
 
 ###############################################################################
 # Flock-based resource protection
@@ -31,7 +30,7 @@ source "$SCRIPT_DIR/lib-iiab.sh"
 LOCK_FILE="$STATE_DIR/.democtl.lock"
 LOCK_FD=200
 
-# Stale lock detection — verify the lock-holding process is actually a democtl
+# Stale lock detection -- verify the lock-holding process is actually a democtl
 _try_clean_stale_lock() {
     if [ -f "$LOCK_FILE" ]; then
         local stale_pid=""
@@ -43,11 +42,11 @@ _try_clean_stale_lock() {
                 rm -f "$LOCK_FILE" "$LOCK_FILE.pid"
                 return 0  # Caller should retry
             fi
-            # Process exists — verify it's actually a democtl process (avoid PID reuse false positives)
+            # Process exists -- verify it's actually a democtl process (avoid PID reuse false positives)
             local cmdline=""
             cmdline=$(tr '\0' ' ' < "/proc/$stale_pid/cmdline" 2>/dev/null || echo "")
             if [ -n "$cmdline" ] && ! echo "$cmdline" | grep -q 'democtl'; then
-                # Process exists but is NOT democtl — likely PID reuse, treat as stale
+                # Process exists but is NOT democtl -- likely PID reuse, treat as stale
                 local lock_age
                 lock_age=$(( $(date +%s) - $(stat -c%Y "$LOCK_FILE" 2>/dev/null || date +%s) ))
                 if [ "$lock_age" -gt 300 ]; then  # Only override if lock is > 5 min old
@@ -64,17 +63,23 @@ _try_clean_stale_lock() {
     return 1  # No stale lock or process still alive (and is democtl)
 }
 
-# Acquire an exclusive lock. Non-blocking by default — errors out immediately
+# Acquire an exclusive lock. Non-blocking by default -- errors out immediately
 # if the lock is held, so concurrent adds fail cleanly instead of racing.
 acquire_lock() {
     local timeout="${1:--1}"  # -1 = wait forever, 0 = non-blocking
     eval "exec $LOCK_FD>$LOCK_FILE"
+
+    # Write PID before flock so stale-lock detection always sees a valid PID.
+    # This avoids a race where another caller reads a stale PID between flock
+    # success and the PID write.
+    echo $$ > "$LOCK_FILE.pid"
 
     if [ "$timeout" = "0" ]; then
         if ! flock -n "$LOCK_FD"; then
             # Attempt stale lock cleanup
             if _try_clean_stale_lock; then
                 eval "exec $LOCK_FD>$LOCK_FILE"
+                echo $$ > "$LOCK_FILE.pid"
                 if ! flock -n "$LOCK_FD"; then
                     echo "Error: another democtl operation is in progress (lock held)." >&2
                     echo "  If no other democtl is running, remove stale lock:" >&2
@@ -95,6 +100,7 @@ acquire_lock() {
             while ! flock -n "$LOCK_FD" 2>/dev/null; do
                 if _try_clean_stale_lock; then
                     eval "exec $LOCK_FD>$LOCK_FILE"
+                    echo $$ > "$LOCK_FILE.pid"
                     if flock -n "$LOCK_FD"; then
                         break
                     fi
@@ -112,9 +118,6 @@ acquire_lock() {
             flock -w "$timeout" "$LOCK_FD"
         fi
     fi
-
-    # Record our PID for stale lock detection by subsequent callers
-    echo $$ > "$LOCK_FILE.pid"
 }
 
 release_lock() {
@@ -211,7 +214,7 @@ next_ip() {
     if [ "$used_count" -gt 0 ]; then
         local remaining=$(( 253 - used_count ))
         if [ "$remaining" -lt 10 ]; then
-            echo "Warning: Subnet pool running low — ${used_count}/253 IPs used, ${remaining} remaining" >&2
+            echo "Warning: Subnet pool running low -- ${used_count}/253 IPs used, ${remaining} remaining" >&2
         fi
     fi
 
@@ -267,7 +270,7 @@ check_resources() {
 
     load_resources
 
-    # All demos build in RAM (tmpfs) — check available RAM for the build
+    # All demos build in RAM (tmpfs) -- check available RAM for the build
     local ram_avail=$(( RAM_TOTAL - RAM_ALLOCATED - RAM_BUFFER ))
     local ram_needed=$(( size_mb + RAM_BUFFER ))
     if [ "$ram_needed" -gt "$ram_avail" ]; then
@@ -395,7 +398,7 @@ cmd_add() {
     fi
 
     # Validate local-vars path exists early (before acquiring lock)
-    if [ -n "$local_vars" ] && [[ "$local_vars" == /* ]] && [ ! -f "$local_vars" ]; then
+    if [ -n "$local_vars" ] && [ ! -f "$local_vars" ]; then
         echo "Error: local-vars file not found: $local_vars" >&2
         return 1
     fi
@@ -449,11 +452,13 @@ EOF
     echo "pending" > "$demo_dir/status"
     echo "" > "$demo_dir/build.log"
 
-    # Release lock — the build runs independently now
+    # Release lock -- the build runs independently now
     release_lock
     trap - EXIT
 
-    echo "Demo '$name' queued (subdomain: ${name}.iiab.io, IP: $ip)"
+    local subdomain
+    subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
+    echo "Demo '$name' queued (subdomain: ${subdomain}.iiab.io, IP: $ip)"
 
     if $foreground; then
         build_demo "$name"
@@ -515,7 +520,7 @@ EOF
 }
 
 ###############################################################################
-# build_demo — background build process
+# build_demo -- background build process
 ###############################################################################
 build_demo() {
     local name="$1"
@@ -541,19 +546,20 @@ build_demo() {
         return 1
     fi
 
-    # Resource pre-flight (re-check under lock — resources may have changed since add)
+    # Resource pre-flight (re-check under lock -- resources may have changed since add)
     if ! acquire_lock 0; then
-        log_demo "$name" "Warning: Could not acquire lock for resource re-check"
-    else
-        # shellcheck disable=SC2153  # Variables are set via source from config file
-        if ! check_resources "$name" "$IMAGE_SIZE_MB" "$RAM_IMAGE"; then
-            log_demo "$name" "Resources no longer available, aborting build"
-            release_lock
-            echo "failed" > "$demo_dir/status"
-                return 1
-        fi
-        release_lock
+        log_demo "$name" "Error: Could not acquire lock for resource re-check -- another operation may be in progress"
+        echo "failed" > "$demo_dir/status"
+        return 1
     fi
+    # shellcheck disable=SC2153  # Variables are set via source from config file
+    if ! check_resources "$name" "$IMAGE_SIZE_MB" "$RAM_IMAGE"; then
+        log_demo "$name" "Resources no longer available, aborting build"
+        release_lock
+        echo "failed" > "$demo_dir/status"
+        return 1
+    fi
+    release_lock
 
     # shellcheck disable=SC2153
     local build_args=(
@@ -619,7 +625,9 @@ build_demo() {
 
     log_demo "$name" "Starting container via systemd-nspawn@${name}.service..."
     systemctl daemon-reload
-    systemctl enable --now "systemd-nspawn@${name}.service" 2>/dev/null || true
+    if ! systemctl enable --now "systemd-nspawn@${name}.service" 2>/dev/null; then
+        log_demo "$name" "Warning: systemctl enable --now returned non-zero (container may still start, polling for status...)"
+    fi
 
     # Poll for actual container startup (nspawn can fail asynchronously)
     # We check SubState on the nspawn service itself, not the machine scope.
@@ -686,20 +694,28 @@ cmd_remove() {
     echo "Removing demo '$name'..."
 
     # Stop container
-    systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null || true
-    systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null || true
+    if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
+        echo "Warning: Could not stop systemd-nspawn@${name}.service (may not be running, continuing removal)"
+    fi
+    if ! systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null; then
+        echo "Warning: Could not disable systemd-nspawn@${name}.service (may not be registered, continuing removal)"
+    fi
 
     # Kill any running build and watchdog
     if [ -f "$demo_dir/build.watchdog" ]; then
         local wpid
         wpid=$(cat "$demo_dir/build.watchdog")
-        kill "$wpid" 2>/dev/null || true
+        if ! kill "$wpid" 2>/dev/null; then
+            echo "Warning: Build watchdog PID $wpid not running (already exited)"
+        fi
         rm -f "$demo_dir/build.watchdog"
     fi
     if [ -f "$demo_dir/build.pid" ]; then
         local pid
         pid=$(cat "$demo_dir/build.pid")
-        kill "$pid" 2>/dev/null || true
+        if ! kill "$pid" 2>/dev/null; then
+            echo "Warning: Build PID $pid not running (already exited)"
+        fi
         rm -f "$demo_dir/build.pid"
     fi
 
@@ -709,7 +725,9 @@ cmd_remove() {
 
     # Remove from RAMFS if loaded
     if [ -x "$SCRIPT_DIR/ramfs-setup.sh" ]; then
-        bash "$SCRIPT_DIR/ramfs-setup.sh" unload "$name" 2>/dev/null || true
+        if ! bash "$SCRIPT_DIR/ramfs-setup.sh" unload "$name" 2>/dev/null; then
+            echo "Warning: Could not unload RAMFS image for '$name' (may not be loaded, continuing removal)"
+        fi
     fi
 
     # Remove image and symlinks
@@ -720,7 +738,7 @@ cmd_remove() {
     rm -f "/etc/systemd/nspawn/${name}.nspawn"
     rm -rf "/etc/systemd/system/systemd-nspawn@${name}.service.d"
 
-    # Remove demo state (under lock — last step frees the IP slot)
+    # Remove demo state (under lock -- last step frees the IP slot)
     rm -rf "$demo_dir"
 
     # Release lock
@@ -820,8 +838,10 @@ cmd_list() {
             total_ram_used=$(( total_ram_used + IMAGE_SIZE_MB ))
         fi
         local desc="${DESCRIPTION:--}"
+        local list_subdomain
+        list_subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
         printf "%-15s %-20s %-12s %-10s %-10s %s\n" \
-            "$name" "${SUBDOMAIN:-$name}.iiab.io" "$ip" "$status" "$ram_display" "$desc"
+            "$name" "${list_subdomain}.iiab.io" "$ip" "$status" "$ram_display" "$desc"
     done
 
     echo ""
@@ -849,7 +869,9 @@ cmd_status() {
     status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
 
     echo "=== Demo: $name ==="
-    echo "Subdomain:  ${name}.iiab.io"
+    local status_subdomain
+    status_subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
+    echo "Subdomain:  ${status_subdomain}.iiab.io"
     echo "Branch:     $IIAB_BRANCH"
     echo "Repo:       $IIAB_REPO"
     echo "IP:         $ip"
@@ -885,7 +907,7 @@ cmd_status() {
                 if [ "$days_left" -lt 0 ]; then
                     echo "  Status: EXPIRED ($(( -days_left )) days ago)"
                 elif [ "$days_left" -lt 7 ]; then
-                    echo "  Status: WARNING — expires in $days_left days"
+                    echo "  Status: WARNING -- expires in $days_left days"
                 else
                     echo "  Status: OK ($days_left days remaining)"
                 fi
@@ -976,7 +998,7 @@ cmd_shell() {
 }
 
 ###############################################################################
-# democtl settle — wait until all demos are running or failed
+# democtl settle -- wait until all demos are running or failed
 ###############################################################################
 cmd_settle() {
     ensure_root "$@"
@@ -1059,7 +1081,7 @@ cmd_settle() {
 }
 
 ###############################################################################
-# democtl reconcile — fix drift in allocated resource counters
+# democtl reconcile -- fix drift in allocated resource counters
 ###############################################################################
 cmd_reconcile() {
     ensure_root "$@"
@@ -1111,7 +1133,7 @@ cmd_reconcile() {
 }
 
 ###############################################################################
-# democtl reload — regenerate nginx
+# democtl reload -- regenerate nginx
 ###############################################################################
 cmd_reload() {
     ensure_root "$@"
@@ -1161,8 +1183,12 @@ cmd_shutdown() {
     fi
 
     echo "Shutting down demo '$name'..."
-    systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null || true
-    systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null || true
+    if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
+        echo "Warning: Could not stop systemd-nspawn@${name}.service (may not be running)"
+    fi
+    if ! systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null; then
+        echo "Warning: Could not disable systemd-nspawn@${name}.service (may not be registered)"
+    fi
     echo "stopped" > "$demo_dir/status"
     echo "Demo '$name' has been shut down."
 }
@@ -1300,7 +1326,7 @@ Add flags:
   --size <MB>               Image size (default: 15000)
   --disk-backed             Keep image on disk instead of RAM (default: no)
   --volatile <mode>         no | overlay | state | yes (default: overlay)
-  --local-vars <path>       Path to local_vars.yml (relative to IIAB repo in container)
+  --local-vars <path>       Path to local_vars.yml (host path or relative to cwd; falls back to IIAB repo)
   --wildcard                Use as wildcard for unknown subdomains
   --description <text>      Human-readable description
   --build-on-disk           Build on disk instead of RAM (default: build in RAM)

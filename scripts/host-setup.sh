@@ -93,16 +93,16 @@ fi
 echo ""
 echo "=== Configuring container bridge network ==="
 
-BRIDGE_NETDEV="/etc/systemd/network/iiab-br0.netdev"
-BRIDGE_NETWORK="/etc/systemd/network/iiab-br0.network"
+BRIDGE_NETDEV="/etc/systemd/network/${IIAB_BRIDGE}.netdev"
+BRIDGE_NETWORK="/etc/systemd/network/${IIAB_BRIDGE}.network"
 
 # Create netdev file
 netdev_changed=false
 if [ ! -f "$BRIDGE_NETDEV" ]; then
     echo "Creating bridge netdev config..."
-    cat > "$BRIDGE_NETDEV" << 'EOF'
+    cat > "$BRIDGE_NETDEV" << EOF
 [NetDev]
-Name=iiab-br0
+Name=${IIAB_BRIDGE}
 Kind=bridge
 
 [Bridge]
@@ -110,7 +110,7 @@ DefaultPVID=
 VLANFiltering=false
 
 [Network]
-Address=10.0.3.1/24
+Address=${IIAB_GW}/24
 IPForward=yes
 IPMasquerade=yes
 EOF
@@ -123,12 +123,12 @@ fi
 network_changed=false
 if [ ! -f "$BRIDGE_NETWORK" ]; then
     echo "Creating bridge network config..."
-    cat > "$BRIDGE_NETWORK" << 'EOF'
+    cat > "$BRIDGE_NETWORK" << EOF
 [Match]
-Name=iiab-br0
+Name=${IIAB_BRIDGE}
 
 [Network]
-Address=10.0.3.1/24
+Address=${IIAB_GW}/24
 IPForward=yes
 IPMasquerade=yes
 EOF

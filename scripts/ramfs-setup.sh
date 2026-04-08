@@ -4,7 +4,7 @@
 #   action: load, unload, status, cleanup
 #
 # When ram_image is enabled, the .raw image is copied to a tmpfs mount
-# so the container boots entirely from RAM — no disk I/O after initial load.
+# so the container boots entirely from RAM -- no disk I/O after initial load.
 set -euo pipefail
 
 ACTION="${1:?Error: Action required (load, unload, status, cleanup)}"

@@ -16,12 +16,12 @@ sudo make install
 The `democtl` tool is the primary interface for managing demos.
 
 ### Core Commands
-- `add <name> [flags]` — Build and start a new demo (runs in background).
-- `remove <name>` — Stop, delete, and free all resources.
-- `list` / `status <name>` — Monitor active demos and their build logs.
-- `shell <name>` — Drop directly into a running container.
-- `rebuild <name>` — Refresh a demo while preserving its configuration.
-- `reload` — Manually regenerate Nginx routing from active demos.
+- `add <name> [flags]` -- Build and start a new demo (runs in background).
+- `remove <name>` -- Stop, delete, and free all resources.
+- `list` / `status <name>` -- Monitor active demos and their build logs.
+- `shell <name>` -- Drop directly into a running container.
+- `rebuild <name>` -- Refresh a demo while preserving its configuration.
+- `reload` -- Manually regenerate Nginx routing from active demos.
 
 ### Important Flags
 | Flag | Default | Description |
@@ -30,10 +30,6 @@ The `democtl` tool is the primary interface for managing demos.
 | `--branch` | `master` | Git ref (branch, tag, or PR head). |
 | `--local-vars` | `vars/local_vars_small.yml` | Path to IIAB configuration variables. |
 | `--size` | 15000 | Virtual disk size in MB. |
-| `--disk-backed` | `false` | Store final image on disk instead of RAM (tmpfs). |
-| `--build-on-disk`| `false` | Perform build on disk instead of RAM (tmpfs). |
-| `--volatile` | `state` | Resilience: `no` (persistent), `state` (reset /var), `yes` (stateless). |
-
 
 ## Technical Architecture
 
@@ -51,12 +47,12 @@ There are three independent layers of storage handling:
 
 3. Runtime Persistence: How changes inside the container are handled.
 
-| Mode | Rootfs | /var | Persists across restarts? | Requires bootable /usr? |
-|---|---|---|---|---|
-| `--volatile no` | persistent | persistent | Yes | No |
-| `--volatile overlay` (Default) | overlay (tmpfs upper) | same overlay | No | No |
-| `--volatile state` | volatile (tmpfs) | persistent | /var only | Yes |
-| `--volatile yes` | volatile (tmpfs) | volatile | Nothing | Yes |
+| Mode | Rootfs | ro mounts | rw mounts | Persists across restarts? | Requires bootable /usr? |
+|---|---|---|---|---|---|
+| `--volatile no` | persistent | none | / (entire root) | Yes | No |
+| `--volatile overlay` (Default) | overlay (tmpfs upper) | none (overlay upper is rw) | / (overlay) | No | No |
+| `--volatile state` | volatile (tmpfs) | /etc, /usr | /var | /var only | Yes |
+| `--volatile yes` | volatile (tmpfs) | none | / (entire root, tmpfs) | Nothing | Yes |
 
 - `no`: The root filesystem is persistent. All changes written to the underlying image survive restarts.
 - `overlay`: An overlayfs is placed on top of the rootfs with a tmpfs upper layer. The image stays read-only on disk, but all changes (including `/var`) are discarded when the container is stopped. Works with any rootfs.

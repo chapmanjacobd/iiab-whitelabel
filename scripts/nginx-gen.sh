@@ -13,13 +13,34 @@ ACTIVE_DIR="$STATE_DIR/active"
 NGINX_CONF="/etc/nginx/sites-available/iiab-demo.conf"
 CERTBOT_ROOT="/var/www/certbot"
 
+# Flock to prevent concurrent nginx config writes/reloads
+NGINX_LOCK="/var/lib/iiab-demos/.nginx-gen.lock"
+NGINX_LOCK_FD=202
+
+acquire_nginx_lock() {
+    eval "exec $NGINX_LOCK_FD>$NGINX_LOCK"
+    if ! flock -w 30 "$NGINX_LOCK_FD"; then
+        echo "Error: Could not acquire nginx generation lock -- another generation may be in progress" >&2
+        exit 1
+    fi
+}
+
+release_nginx_lock() {
+    flock -u "$NGINX_LOCK_FD" 2>/dev/null || true
+}
+
+trap release_nginx_lock EXIT
+
+# Acquire lock before generating config
+acquire_nginx_lock
+
 # Collect active demos into array
 demo_names=()
 for demo_dir in "$ACTIVE_DIR"/*/; do
     [ -d "$demo_dir" ] || continue
     dname=$(basename "$demo_dir")
     if [ ! -f "$demo_dir/config" ]; then
-        echo "Warning: Demo '$dname' has no config file — skipping nginx generation" >&2
+        echo "Warning: Demo '$dname' has no config file -- skipping nginx generation" >&2
         continue
     fi
     demo_names+=("$dname")
@@ -75,7 +96,7 @@ HEADER
     printf '    }\n'
     printf '}\n\n'
 
-    # HTTP server blocks — one per demo (avoids if-in-location issues)
+    # HTTP server blocks -- one per demo (avoids if-in-location issues)
     for name in "${demo_names[@]}"; do
         # shellcheck source=/dev/null
         source "$ACTIVE_DIR/$name/config"
@@ -84,7 +105,7 @@ HEADER
         upstream_name=$(echo "$name" | tr '-' '_')
 
         if [ -f "$cert_path" ]; then
-            # HTTPS available — redirect HTTP to HTTPS
+            # HTTPS available -- redirect HTTP to HTTPS
             printf '# HTTP redirect for %s.iiab.io\n' "$subdomain"
             printf 'server {\n'
             printf '    listen 80;\n'
@@ -98,7 +119,7 @@ HEADER
             printf '    }\n'
             printf '}\n\n'
         else
-            # No HTTPS — proxy to container
+            # No HTTPS -- proxy to container
             printf '# HTTP proxy for %s.iiab.io\n' "$subdomain"
             printf 'server {\n'
             printf '    listen 80;\n'

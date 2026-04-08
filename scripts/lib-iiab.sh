@@ -9,6 +9,16 @@
 set -euo pipefail
 
 ###############################################################################
+# Shared network configuration
+# These values are used by all scripts that source this library.
+###############################################################################
+IIAB_BRIDGE="iiab-br0"
+IIAB_SUBNET_BASE="10.0.3"
+IIAB_GW="10.0.3.1"
+# shellcheck disable=SC2034  # IIAB_DEMO_SUBNET is used by democtl (cross-file)
+IIAB_DEMO_SUBNET="${IIAB_SUBNET_BASE}.0/24"
+
+###############################################################################
 # Root / directory / nginx helpers
 ###############################################################################
 
@@ -83,8 +93,8 @@ setup_iptables_nat() {
 # while allowing access to the host (for nginx reverse proxy) and the internet.
 # This prevents a compromised container from attacking peers on the bridge.
 # Can be called with or without a container IP:
-#   add_container_isolation        — Just ensure the isolation rule exists
-#   add_container_isolation <ip>   — Also allow this specific container to reach host
+#   add_container_isolation        -- Just ensure the isolation rule exists
+#   add_container_isolation <ip>   -- Also allow this specific container to reach host
 #
 # FORWARD chain ordering (critical):
 #   1. ACCEPT: container → host (nginx)
@@ -93,8 +103,8 @@ setup_iptables_nat() {
 #   4. ACCEPT: internet → container (established)
 #   5. DROP:   container → container  (isolation)
 add_container_isolation() {
-    local bridge="iiab-br0"
-    local host_ip="10.0.3.1"
+    local bridge="${IIAB_BRIDGE}"
+    local host_ip="${IIAB_GW}"
 
     # Use iptables-save for idempotency since -C doesn't support wildcards like ve-+
     # Allow container(s) to reach the host (nginx reverse proxy)
@@ -117,10 +127,10 @@ add_container_isolation() {
     fi
 }
 
-# Remove per-container network isolation rules (cleanup — rarely needed).
+# Remove per-container network isolation rules (cleanup -- rarely needed).
 # The isolation rules are global and persistent, so this is only for teardown.
 remove_container_isolation() {
     iptables -D FORWARD -i "ve-+" -o "ve-+" -j DROP 2>/dev/null || true
-    iptables -D FORWARD -i "ve-+" -o "iiab-br0" -d "10.0.3.1" -j ACCEPT 2>/dev/null || true
-    iptables -D FORWARD -i "iiab-br0" -o "ve-+" -s "10.0.3.1" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -i "ve-+" -o "${IIAB_BRIDGE}" -d "${IIAB_GW}" -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -i "${IIAB_BRIDGE}" -o "ve-+" -s "${IIAB_GW}" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 }
