@@ -159,14 +159,16 @@ add_container_isolation() {
     local subnet="${IIAB_DEMO_SUBNET}"
     local bridge="${IIAB_BRIDGE}"
 
-    # Remove any existing inet iiab table first (clean slate)
-    nft delete table inet iiab 2>/dev/null || true
+    # Ensure the table exists
+    nft add table inet iiab 2>/dev/null || true
 
-    # Create the table and chains
-    nft add table inet iiab
-    nft add chain inet iiab forward '{ type filter hook forward priority filter - 1; policy accept; }'
-    nft add chain inet iiab input '{ type filter hook input priority filter - 1; policy accept; }'
-    nft add chain inet iiab postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
+    # Create or recreate forward chain (idempotent)
+    nft add chain inet iiab forward '{ type filter hook forward priority filter - 1; policy accept; }' 2>/dev/null || true
+    nft flush chain inet iiab forward
+
+    # Create or recreate input chain (idempotent)
+    nft add chain inet iiab input '{ type filter hook input priority filter - 1; policy accept; }' 2>/dev/null || true
+    nft flush chain inet iiab input
 
     # FORWARD rules (priority filter - 1 ensures these run before any other filter rules)
     # A. Allow established/related traffic
