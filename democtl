@@ -325,14 +325,14 @@ cmd_init() {
     ensure_state_dirs
     echo ""
     echo "Host initialized. Now add demos with:"
-    echo "  democtl add small --local-vars vars/local_vars_small.yml --size 12000"
+    echo "  democtl build small --local-vars vars/local_vars_small.yml --size 12000"
     echo "  make small medium large"
 }
 
 ###############################################################################
-# democtl add
+# democtl build
 ###############################################################################
-cmd_add() {
+cmd_build() {
     ensure_root "$@"
 
     # Defaults
@@ -341,11 +341,12 @@ cmd_add() {
     local size_mb=15000 volatile="overlay" ram_image=true
     local local_vars="" wildcard=false description=""
     local foreground=false build_on_disk=false skip_install=false
+    local start_after_build=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            add) shift ;;  # skip 'add' from parsed args
+            build) shift ;;  # skip 'build' from parsed args
             --branch)     branch="$2"; shift 2 ;;
             --repo)       repo="$2"; shift 2 ;;
             --size)       size_mb="$2"; shift 2 ;;
@@ -357,6 +358,7 @@ cmd_add() {
             --description) description="$2"; shift 2 ;;
             --build-on-disk) build_on_disk=true; shift ;;
             --skip-install) skip_install=true; shift ;;
+            --start)      start_after_build=true; shift ;;
             --fg)         foreground=true; shift ;;
             *)
                 if [ -z "$name" ]; then
@@ -376,7 +378,7 @@ cmd_add() {
 
     if [ -z "$name" ]; then
         echo "Error: demo name required" >&2
-        echo "Usage: democtl add <name> [--branch <branch>] ..." >&2
+        echo "Usage: democtl build <name> [--branch <branch>] [--start] ..." >&2
         return 1
     fi
 
@@ -462,11 +464,11 @@ EOF
     echo "Demo '$name' queued (subdomain: ${subdomain}.iiab.io, IP: $ip)"
 
     if $foreground; then
-        build_demo "$name"
+        build_demo "$name" "$start_after_build"
     else
         # Fork build in background with heartbeat monitoring
         (
-            build_demo "$name" >> "$demo_dir/build.log" 2>&1
+            build_demo "$name" "$start_after_build" >> "$demo_dir/build.log" 2>&1
         ) &
         local pid=$!
         echo "$pid" > "$demo_dir/build.pid"
@@ -525,6 +527,7 @@ EOF
 ###############################################################################
 build_demo() {
     local name="$1"
+    local start_after="${2:-false}"
     local demo_dir="$ACTIVE_DIR/$name"
 
     log_demo "$name" "Starting build..."
@@ -547,7 +550,7 @@ build_demo() {
         return 1
     fi
 
-    # Resource pre-flight (re-check under lock -- resources may have changed since add)
+    # Resource pre-flight (re-check under lock -- resources may have changed since build)
     if ! acquire_lock 0; then
         log_demo "$name" "Error: Could not acquire lock for resource re-check -- another operation may be in progress"
         echo "failed" > "$demo_dir/status"
@@ -608,75 +611,16 @@ build_demo() {
         bash "$service_script" "${svc_args[@]}"
     fi
 
-    # Register and start with systemd
-    local image_path
-    if [ "$RAM_IMAGE" = "true" ] && [ -f "/run/iiab-ramfs/${name}.raw" ]; then
-        image_path="/run/iiab-ramfs/${name}.raw"
-        # For systemd-nspawn@.service to find it, symlink to /var/lib/machines
-        ln -sf "$image_path" "/var/lib/machines/${name}.raw"
-    else
-        image_path="/var/lib/machines/${name}.raw"
-    fi
-
-    if [ ! -f "$image_path" ]; then
-        log_demo "$name" "Error: Image not found at $image_path"
-        echo "failed" > "$demo_dir/status"
-        return 1
-    fi
-
-    log_demo "$name" "Starting container via systemd-nspawn@${name}.service..."
-    systemctl daemon-reload
-    if ! systemctl enable --now "systemd-nspawn@${name}.service" 2>/dev/null; then
-        log_demo "$name" "Warning: systemctl enable --now returned non-zero (container may still start, polling for status...)"
-    fi
-
-    # Poll for actual container startup (nspawn can fail asynchronously)
-    # We check SubState on the nspawn service itself, not the machine scope.
-    sleep 3
-    local poll_count=0
-    local poll_max=20
-    local container_active=false
-    while [ $poll_count -lt $poll_max ]; do
-        local substate=""
-        substate=$(systemctl show "systemd-nspawn@${name}.service" --property=SubState --value 2>/dev/null || echo "")
-        # Handle both stripped and non-stripped values (older systemd)
-        if [ "$substate" = "running" ] || [[ "$substate" == *"=running" ]]; then
-            container_active=true
-            break
-        fi
-        # Also catch crash-looping: active=activating with substate=auto-restart
-        if [ "$substate" = "auto-restart" ] || [[ "$substate" == *"=auto-restart" ]]; then
-            break
-        fi
-        poll_count=$((poll_count + 1))
-        sleep 1
-    done
-
-    if ! $container_active; then
-        log_demo "$name" "Error: Container did not start successfully within ${poll_max}s"
-        log_demo "$name" "--- systemd-nspawn@${name}.service state ---"
-        systemctl show "systemd-nspawn@${name}.service" --property=ActiveState,SubState,ExecMainStatus 2>&1 || true
-        log_demo "$name" "--- journalctl _COMM=systemd-nspawn (last 30 lines) ---"
-        journalctl _COMM=systemd-nspawn --no-pager -n 30 2>&1 || true
-        log_demo "$name" "--- Full journal for nspawn@${name}.service (last 50 lines) ---"
-        journalctl -u "systemd-nspawn@${name}.service" --no-pager -n 50 2>&1 || true
-        echo "failed" > "$demo_dir/status"
-        return 1
-    fi
-
-    # Regenerate nginx
-    log_demo "$name" "Updating nginx configuration..."
-    if [ -x "$SCRIPT_DIR/nginx-gen.sh" ]; then
-        bash "$SCRIPT_DIR/nginx-gen.sh"
-    fi
-
-    # Apply network isolation rules (global, idempotent)
-    log_demo "$name" "Ensuring network isolation rules..."
-    add_container_isolation
-
-    echo "running" > "$demo_dir/status"
+    # Image is built and service files are created, but do NOT start yet.
+    # Write 'stopped' as the final state for a completed build.
+    echo "stopped" > "$demo_dir/status"
     rm -f "$demo_dir/build.pid"  # Build complete, clear PID
-    log_demo "$name" "Demo is now running!"
+    log_demo "$name" "Build complete (status: stopped). Use 'democtl start $name' to bring online."
+
+    # If --start was requested, bring the container online now.
+    if [ "$start_after" = "true" ]; then
+        cmd_start "$name"
+    fi
 }
 
 ###############################################################################
@@ -684,77 +628,85 @@ build_demo() {
 ###############################################################################
 cmd_remove() {
     ensure_root "$@"
-    local name="${1:?Error: demo name required}"
-
-    local demo_dir="$ACTIVE_DIR/$name"
-    if [ ! -d "$demo_dir" ]; then
-        echo "Error: demo '$name' not found" >&2
+    if [ $# -eq 0 ]; then
+        echo "Error: at least one demo name required" >&2
+        echo "Usage: democtl remove <name> [name ...]" >&2
         return 1
     fi
 
-    echo "Removing demo '$name'..."
-
-    # Stop container
-    if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
-        echo "Warning: Could not stop systemd-nspawn@${name}.service (may not be running, continuing removal)"
-    fi
-    if ! systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null; then
-        echo "Warning: Could not disable systemd-nspawn@${name}.service (may not be registered, continuing removal)"
-    fi
-
-    # Kill any running build and watchdog
-    if [ -f "$demo_dir/build.watchdog" ]; then
-        local wpid
-        wpid=$(cat "$demo_dir/build.watchdog")
-        if ! kill "$wpid" 2>/dev/null; then
-            echo "Warning: Build watchdog PID $wpid not running (already exited)"
+    local exit_code=0
+    for name in "$@"; do
+        local demo_dir="$ACTIVE_DIR/$name"
+        if [ ! -d "$demo_dir" ]; then
+            echo "Error: demo '$name' not found" >&2
+            exit_code=1
+            continue
         fi
-        rm -f "$demo_dir/build.watchdog"
-    fi
-    if [ -f "$demo_dir/build.pid" ]; then
-        local pid
-        pid=$(cat "$demo_dir/build.pid")
-        if ! kill "$pid" 2>/dev/null; then
-            echo "Warning: Build PID $pid not running (already exited)"
+
+        echo "Removing demo '$name'..."
+
+        # Stop container
+        if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
+            echo "Warning: Could not stop systemd-nspawn@${name}.service (may not be running, continuing removal)"
         fi
-        rm -f "$demo_dir/build.pid"
-    fi
-
-    # Acquire lock for: read config → cleanup
-    acquire_lock 0 || return 1
-    trap release_lock EXIT
-
-    # Remove from RAMFS if loaded
-    if [ -x "$SCRIPT_DIR/ramfs-setup.sh" ]; then
-        if ! bash "$SCRIPT_DIR/ramfs-setup.sh" unload "$name" 2>/dev/null; then
-            echo "Warning: Could not unload RAMFS image for '$name' (may not be loaded, continuing removal)"
+        if ! systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null; then
+            echo "Warning: Could not disable systemd-nspawn@${name}.service (may not be registered, continuing removal)"
         fi
-    fi
 
-    # Remove image and symlinks
-    rm -f "/var/lib/machines/${name}.raw"
-    rm -f "/run/iiab-ramfs/${name}.raw"
+        # Kill any running build and watchdog
+        if [ -f "$demo_dir/build.watchdog" ]; then
+            local wpid
+            wpid=$(cat "$demo_dir/build.watchdog")
+            if ! kill "$wpid" 2>/dev/null; then
+                echo "Warning: Build watchdog PID $wpid not running (already exited)"
+            fi
+            rm -f "$demo_dir/build.watchdog"
+        fi
+        if [ -f "$demo_dir/build.pid" ]; then
+            local pid
+            pid=$(cat "$demo_dir/build.pid")
+            if ! kill "$pid" 2>/dev/null; then
+                echo "Warning: Build PID $pid not running (already exited)"
+            fi
+            rm -f "$demo_dir/build.pid"
+        fi
 
-    # Remove .nspawn config
-    rm -f "/etc/systemd/nspawn/${name}.nspawn"
-    rm -rf "/etc/systemd/system/systemd-nspawn@${name}.service.d"
+        # Acquire lock for: read config → cleanup
+        acquire_lock 0 || { exit_code=1; continue; }
+        trap release_lock EXIT
 
-    # Remove demo state (under lock -- last step frees the IP slot)
-    rm -rf "$demo_dir"
+        # Remove from RAMFS if loaded
+        if [ -x "$SCRIPT_DIR/ramfs-setup.sh" ]; then
+            if ! bash "$SCRIPT_DIR/ramfs-setup.sh" unload "$name" 2>/dev/null; then
+                echo "Warning: Could not unload RAMFS image for '$name' (may not be loaded, continuing removal)"
+            fi
+        fi
 
-    # Release lock
-    release_lock
-    trap - EXIT
+        # Remove image and symlinks
+        rm -f "/var/lib/machines/${name}.raw"
+        rm -f "/run/iiab-ramfs/${name}.raw"
 
-    echo "Demo '$name' removed."
+        # Remove .nspawn config
+        rm -f "/etc/systemd/nspawn/${name}.nspawn"
+        rm -rf "/etc/systemd/system/systemd-nspawn@${name}.service.d"
 
-    # Reload systemd
+        # Remove demo state (under lock -- last step frees the IP slot)
+        rm -rf "$demo_dir"
+
+        # Release lock
+        release_lock
+        trap - EXIT
+
+        echo "Demo '$name' removed."
+    done
+
+    # Reload systemd and regenerate nginx once after all removals
     systemctl daemon-reload
-
-    # Regenerate nginx
     if [ -x "$SCRIPT_DIR/nginx-gen.sh" ]; then
         bash "$SCRIPT_DIR/nginx-gen.sh"
     fi
+
+    return $exit_code
 }
 
 ###############################################################################
@@ -762,49 +714,62 @@ cmd_remove() {
 ###############################################################################
 cmd_rebuild() {
     ensure_root "$@"
-    local name="${1:?Error: demo name required}"
-
-    # Save config before removing
-    local demo_dir="$ACTIVE_DIR/$name"
-    if [ ! -d "$demo_dir" ] || [ ! -f "$demo_dir/config" ]; then
-        echo "Error: demo '$name' not found" >&2
+    if [ $# -eq 0 ]; then
+        echo "Error: at least one demo name required" >&2
+        echo "Usage: democtl rebuild <name> [name ...]" >&2
         return 1
     fi
 
-    local saved_config
-    saved_config=$(cat "$demo_dir/config")
+    local exit_code=0
+    for name in "$@"; do
+        local demo_dir="$ACTIVE_DIR/$name"
+        if [ ! -d "$demo_dir" ] || [ ! -f "$demo_dir/config" ]; then
+            echo "Error: demo '$name' not found" >&2
+            exit_code=1
+            continue
+        fi
 
-    cmd_remove "$name"
+        # Save config before removing
+        local saved_config
+        saved_config=$(cat "$demo_dir/config")
 
-    # Re-add with saved config
-    while IFS='=' read -r key value; do
-        case "$key" in
-            IIAB_BRANCH)   branch="$value" ;;
-            IIAB_REPO)     repo="$value" ;;
-            IMAGE_SIZE_MB) size_mb="$value" ;;
-            VOLATILE)      volatile="$value" ;;
-            RAM_IMAGE)     ram_image=$value ;;
-            BUILD_ON_DISK) build_on_disk=$value ;;
-            SKIP_INSTALL)  skip_install=$value ;;
-            LOCAL_VARS)    local_vars="$value" ;;
-            WILDCARD)      wildcard=$value ;;
-            DESCRIPTION)   description="$value" ;;
-        esac
-    done <<< "$saved_config"
+        cmd_remove "$name" || { exit_code=1; continue; }
 
-    local add_args=("$name")
-    [ -n "${branch:-}" ] && add_args+=("--branch" "$branch")
-    [ -n "${repo:-}" ] && add_args+=("--repo" "$repo")
-    [ -n "${size_mb:-}" ] && add_args+=("--size" "${size_mb:-15000}")
-    [ -n "${volatile:-}" ] && add_args+=("--volatile" "${volatile:-state}")
-    [ "${ram_image:-true}" = "false" ] && add_args+=("--disk-backed")
-    [ "${build_on_disk:-false}" = "true" ] && add_args+=("--build-on-disk")
-    [ "${skip_install:-false}" = "true" ] && add_args+=("--skip-install")
-    [ -n "${local_vars:-}" ] && add_args+=("--local-vars" "$local_vars")
-    [ "${wildcard:-false}" = "true" ] && add_args+=("--wildcard")
-    [ -n "${description:-}" ] && add_args+=("--description" "$description")
+        # Re-add with saved config
+        local branch="" repo="" size_mb="" volatile="" ram_image=true
+        local local_vars="" wildcard=false description=""
+        local build_on_disk=false skip_install=false
 
-    cmd_add "${add_args[@]}"
+        while IFS='=' read -r key value; do
+            case "$key" in
+                IIAB_BRANCH)   branch="$value" ;;
+                IIAB_REPO)     repo="$value" ;;
+                IMAGE_SIZE_MB) size_mb="$value" ;;
+                VOLATILE)      volatile="$value" ;;
+                RAM_IMAGE)     ram_image=$value ;;
+                BUILD_ON_DISK) build_on_disk=$value ;;
+                SKIP_INSTALL)  skip_install=$value ;;
+                LOCAL_VARS)    local_vars="$value" ;;
+                WILDCARD)      wildcard=$value ;;
+                DESCRIPTION)   description="$value" ;;
+            esac
+        done <<< "$saved_config"
+
+        local add_args=("$name")
+        [ -n "${branch:-}" ] && add_args+=("--branch" "$branch")
+        [ -n "${repo:-}" ] && add_args+=("--repo" "$repo")
+        [ -n "${size_mb:-}" ] && add_args+=("--size" "${size_mb:-15000}")
+        [ -n "${volatile:-}" ] && add_args+=("--volatile" "${volatile:-state}")
+        [ "${ram_image:-true}" = "false" ] && add_args+=("--disk-backed")
+        [ "${build_on_disk:-false}" = "true" ] && add_args+=("--build-on-disk")
+        [ "${skip_install:-false}" = "true" ] && add_args+=("--skip-install")
+        [ -n "${local_vars:-}" ] && add_args+=("--local-vars" "$local_vars")
+        [ "${wildcard:-false}" = "true" ] && add_args+=("--wildcard")
+        [ -n "${description:-}" ] && add_args+=("--description" "$description")
+
+        cmd_build "${add_args[@]}" || exit_code=1
+    done
+    return $exit_code
 }
 
 ###############################################################################
@@ -854,106 +819,121 @@ cmd_list() {
 ###############################################################################
 cmd_status() {
     ensure_root "$@"
-    local name="${1:?Error: demo name required}"
-    local demo_dir="$ACTIVE_DIR/$name"
-
-    if [ ! -d "$demo_dir" ]; then
-        echo "Error: demo '$name' not found" >&2
+    if [ $# -eq 0 ]; then
+        echo "Error: at least one demo name required" >&2
+        echo "Usage: democtl status <name> [name ...]" >&2
         return 1
     fi
 
-    # shellcheck source=/dev/null
-    source "$demo_dir/config"
-    local ip
-    ip=$(cat "$demo_dir/ip")
-    local status
-    status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+    local exit_code=0
+    for name in "$@"; do
+        local demo_dir="$ACTIVE_DIR/$name"
 
-    echo "=== Demo: $name ==="
-    local status_subdomain
-    status_subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
-    echo "Subdomain:  ${status_subdomain}.iiab.io"
-    echo "Branch:     $IIAB_BRANCH"
-    echo "Repo:       $IIAB_REPO"
-    echo "IP:         $ip"
-    echo "Status:     $status"
-    echo "Volatile:   $VOLATILE"
-    echo "RAM Image:  $RAM_IMAGE"
-    echo "Size:       ${IMAGE_SIZE_MB}MB"
-    if [ -n "$DESCRIPTION" ]; then
-        echo "Description: $DESCRIPTION"
-    fi
+        if [ ! -d "$demo_dir" ]; then
+            echo "Error: demo '$name' not found" >&2
+            exit_code=1
+            continue
+        fi
 
-    if [ "$status" = "running" ]; then
-        echo ""
-        systemctl status "systemd-nspawn@${name}.service" --no-pager || true
-    fi
+        # shellcheck source=/dev/null
+        source "$demo_dir/config"
+        local ip
+        ip=$(cat "$demo_dir/ip")
+        local status
+        status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
 
-    # Show certificate expiry info
-    local subdomain
-    subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}" 2>/dev/null || echo "${SUBDOMAIN:-$name}")
-    local cert_path="/etc/letsencrypt/live/${subdomain}.iiab.io/fullchain.pem"
-    if [ -f "$cert_path" ]; then
-        local cert_expiry
-        cert_expiry=$(openssl x509 -enddate -noout -in "$cert_path" 2>/dev/null | cut -d= -f2 || echo "")
-        if [ -n "$cert_expiry" ]; then
-            local expiry_epoch now days_left
-            expiry_epoch=$(date -d "$cert_expiry" +%s 2>/dev/null || echo 0)
-            now=$(date +%s)
-            if [ "$expiry_epoch" -gt 0 ]; then
-                days_left=$(( (expiry_epoch - now) / 86400 ))
-                echo ""
-                echo "Certificate: $cert_path"
-                echo "  Expires: $cert_expiry"
-                if [ "$days_left" -lt 0 ]; then
-                    echo "  Status: EXPIRED ($(( -days_left )) days ago)"
-                elif [ "$days_left" -lt 7 ]; then
-                    echo "  Status: WARNING -- expires in $days_left days"
+        echo "=== Demo: $name ==="
+        local status_subdomain
+        status_subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
+        echo "Subdomain:  ${status_subdomain}.iiab.io"
+        echo "Branch:     $IIAB_BRANCH"
+        echo "Repo:       $IIAB_REPO"
+        echo "IP:         $ip"
+        echo "Status:     $status"
+        echo "Volatile:   $VOLATILE"
+        echo "RAM Image:  $RAM_IMAGE"
+        echo "Size:       ${IMAGE_SIZE_MB}MB"
+        if [ -n "$DESCRIPTION" ]; then
+            echo "Description: $DESCRIPTION"
+        fi
+
+        if [ "$status" = "running" ]; then
+            echo ""
+            systemctl status "systemd-nspawn@${name}.service" --no-pager || true
+        fi
+
+        # Show certificate expiry info
+        local subdomain
+        subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}" 2>/dev/null || echo "${SUBDOMAIN:-$name}")
+        local cert_path="/etc/letsencrypt/live/${subdomain}.iiab.io/fullchain.pem"
+        if [ -f "$cert_path" ]; then
+            local cert_expiry
+            cert_expiry=$(openssl x509 -enddate -noout -in "$cert_path" 2>/dev/null | cut -d= -f2 || echo "")
+            if [ -n "$cert_expiry" ]; then
+                local expiry_epoch now days_left
+                expiry_epoch=$(date -d "$cert_expiry" +%s 2>/dev/null || echo 0)
+                now=$(date +%s)
+                if [ "$expiry_epoch" -gt 0 ]; then
+                    days_left=$(( (expiry_epoch - now) / 86400 ))
+                    echo ""
+                    echo "Certificate: $cert_path"
+                    echo "  Expires: $cert_expiry"
+                    if [ "$days_left" -lt 0 ]; then
+                        echo "  Status: EXPIRED ($(( -days_left )) days ago)"
+                    elif [ "$days_left" -lt 7 ]; then
+                        echo "  Status: WARNING -- expires in $days_left days"
+                    else
+                        echo "  Status: OK ($days_left days remaining)"
+                    fi
+                fi
+            fi
+        elif [ "$status" = "running" ]; then
+            echo ""
+            echo "Certificate: not obtained (run: democtl certbot)"
+        fi
+
+        if [ "$status" = "building" ] && [ -f "$demo_dir/build.pid" ]; then
+            local pid
+            pid=$(cat "$demo_dir/build.pid")
+            echo ""
+            echo "Build PID: $pid"
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "Build is still running..."
+            else
+                echo "Build process has exited (check log)"
+            fi
+
+            # Show watchdog info
+            if [ -f "$demo_dir/build.watchdog" ]; then
+                local wpid
+                wpid=$(cat "$demo_dir/build.watchdog")
+                if kill -0 "$wpid" 2>/dev/null; then
+                    echo "Watchdog PID: $wpid (monitoring)"
                 else
-                    echo "  Status: OK ($days_left days remaining)"
+                    echo "Watchdog PID: $wpid (exited)"
+                fi
+            fi
+
+            # Check for hung build (no log output in 30+ minutes)
+            if [ -f "$demo_dir/build.log" ]; then
+                local log_mtime now age_sec
+                log_mtime=$(stat -c%Y "$demo_dir/build.log" 2>/dev/null || echo 0)
+                now=$(date +%s)
+                age_sec=$(( now - log_mtime ))
+                if [ "$age_sec" -gt 1800 ]; then
+                    echo ""
+                    echo "WARNING: Build log hasn't been updated for $(( age_sec / 60 )) minutes."
+                    echo "  The build may be hung. Consider: democtl remove $name"
                 fi
             fi
         fi
-    elif [ "$status" = "running" ]; then
-        echo ""
-        echo "Certificate: not obtained (run: democtl certbot)"
-    fi
 
-    if [ "$status" = "building" ] && [ -f "$demo_dir/build.pid" ]; then
-        local pid
-        pid=$(cat "$demo_dir/build.pid")
-        echo ""
-        echo "Build PID: $pid"
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "Build is still running..."
-        else
-            echo "Build process has exited (check log)"
+        # Separate output for multiple demos
+        if [ $# -gt 1 ]; then
+            echo ""
         fi
-
-        # Show watchdog info
-        if [ -f "$demo_dir/build.watchdog" ]; then
-            local wpid
-            wpid=$(cat "$demo_dir/build.watchdog")
-            if kill -0 "$wpid" 2>/dev/null; then
-                echo "Watchdog PID: $wpid (monitoring)"
-            else
-                echo "Watchdog PID: $wpid (exited)"
-            fi
-        fi
-
-        # Check for hung build (no log output in 30+ minutes)
-        if [ -f "$demo_dir/build.log" ]; then
-            local log_mtime now age_sec
-            log_mtime=$(stat -c%Y "$demo_dir/build.log" 2>/dev/null || echo 0)
-            now=$(date +%s)
-            age_sec=$(( now - log_mtime ))
-            if [ "$age_sec" -gt 1800 ]; then
-                echo ""
-                echo "WARNING: Build log hasn't been updated for $(( age_sec / 60 )) minutes."
-                echo "  The build may be hung. Consider: democtl remove $name"
-            fi
-        fi
-    fi
+    done
+    return $exit_code
 }
 
 ###############################################################################
@@ -961,25 +941,40 @@ cmd_status() {
 ###############################################################################
 cmd_logs() {
     ensure_root "$@"
-    local name="${1:?Error: demo name required}"
-    local demo_dir="$ACTIVE_DIR/$name"
-
-    if [ ! -d "$demo_dir" ]; then
-        echo "Error: demo '$name' not found" >&2
+    if [ $# -eq 0 ]; then
+        echo "Error: at least one demo name required" >&2
+        echo "Usage: democtl logs <name> [name ...]" >&2
         return 1
     fi
 
-    local status
-    status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+    local exit_code=0
+    for name in "$@"; do
+        local demo_dir="$ACTIVE_DIR/$name"
 
-    if [ "$status" = "running" ]; then
-        journalctl -u "systemd-nspawn@${name}.service" -e --no-pager
-    elif [ -f "$demo_dir/build.log" ]; then
-        echo "=== Build log for '$name' ==="
-        tail -100 "$demo_dir/build.log"
-    else
-        echo "No logs available for '$name'"
-    fi
+        if [ ! -d "$demo_dir" ]; then
+            echo "Error: demo '$name' not found" >&2
+            exit_code=1
+            continue
+        fi
+
+        local status
+        status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+
+        if [ "$status" = "running" ]; then
+            journalctl -u "systemd-nspawn@${name}.service" -e --no-pager
+        elif [ -f "$demo_dir/build.log" ]; then
+            echo "=== Build log for '$name' ==="
+            tail -100 "$demo_dir/build.log"
+        else
+            echo "No logs available for '$name'"
+        fi
+
+        # Separate output for multiple demos
+        if [ $# -gt 1 ]; then
+            echo ""
+        fi
+    done
+    return $exit_code
 }
 
 ###############################################################################
@@ -999,14 +994,15 @@ cmd_shell() {
 }
 
 ###############################################################################
-# democtl settle -- wait until all demos are running or failed
+# democtl settle -- wait until all demos reach a settled state
 ###############################################################################
 cmd_settle() {
     ensure_root "$@"
     local timeout="${1:-3600}"  # Default: wait up to 60 minutes
     ensure_state_dirs
 
-    echo "=== Waiting for all demos to reach running/failed state ==="
+    echo "=== Waiting for all demos to reach a settled state ==="
+    echo "  Settled states: running, stopped, failed"
     echo "  Timeout: ${timeout}s"
 
     local start_time
@@ -1021,15 +1017,15 @@ cmd_settle() {
         if [ "$elapsed" -ge "$timeout" ]; then
             echo ""
             echo "Error: Timed out after ${timeout}s waiting for demos to settle." >&2
-            echo "  Some demos may still be building or hung. Check with: democtl list" >&2
+            echo "  Some demos may still be in transition. Check with: democtl list" >&2
             return 1
         fi
 
         local all_settled=true
-        local pending=()
-        local building=()
+        local in_progress=()
         local failed=()
         local running=0
+        local stopped=0
 
         for demo_dir in "$ACTIVE_DIR"/*/; do
             [ -d "$demo_dir" ] || continue
@@ -1042,34 +1038,38 @@ cmd_settle() {
                 running)
                     running=$((running + 1))
                     ;;
+                stopped)
+                    stopped=$((stopped + 1))
+                    ;;
                 failed)
                     failed+=("$name")
                     ;;
-                building|pending)
+                pending|building|starting|stopping)
                     all_settled=false
-                    building+=("$name")
+                    in_progress+=("$name")
                     ;;
                 *)
                     all_settled=false
-                    pending+=("$name")
+                    in_progress+=("$name")
                     ;;
             esac
         done
 
         # Show progress
-        local total=$(( running + ${#building[@]} + ${#pending[@]} + ${#failed[@]} ))
+        local total=$(( running + stopped + ${#in_progress[@]} + ${#failed[@]} ))
         if [ "$total" -eq 0 ]; then
             echo "No demos found. Nothing to settle."
             return 0
         fi
 
-        echo -ne "\r  Running: $running | Building: ${#building[@]} | Pending: ${#pending[@]} | Failed: ${#failed[@]} | Elapsed: ${elapsed}s  "
+        echo -ne "\r  Running: $running | Stopped: $stopped | In Progress: ${#in_progress[@]} | Failed: ${#failed[@]} | Elapsed: ${elapsed}s  "
 
         if $all_settled; then
             echo ""
             echo ""
             echo "All demos have settled."
             echo "  Running: $running"
+            echo "  Stopped: $stopped"
             if [ ${#failed[@]} -gt 0 ]; then
                 echo "  Failed: ${failed[*]}"
                 return 1
@@ -1163,136 +1163,206 @@ cmd_ramfs() {
 }
 
 ###############################################################################
-# democtl shutdown
+# democtl stop
 ###############################################################################
-cmd_shutdown() {
+cmd_stop() {
     ensure_root "$@"
-    local name="${1:?Error: demo name required}"
-
-    local demo_dir="$ACTIVE_DIR/$name"
-    if [ ! -d "$demo_dir" ]; then
-        echo "Error: demo '$name' not found" >&2
+    if [ $# -eq 0 ]; then
+        echo "Error: at least one demo name required" >&2
+        echo "Usage: democtl stop <name> [name ...]" >&2
         return 1
     fi
 
-    local status
-    status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+    local exit_code=0
+    for name in "$@"; do
+        local demo_dir="$ACTIVE_DIR/$name"
+        if [ ! -d "$demo_dir" ]; then
+            echo "Error: demo '$name' not found" >&2
+            exit_code=1
+            continue
+        fi
 
-    if [ "$status" != "running" ]; then
-        echo "Error: demo '$name' is not running (status: $status)" >&2
-        return 1
-    fi
+        local status
+        status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
 
-    echo "Shutting down demo '$name'..."
-    if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
-        echo "Warning: Could not stop systemd-nspawn@${name}.service (may not be running)"
-    fi
-    if ! systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null; then
-        echo "Warning: Could not disable systemd-nspawn@${name}.service (may not be registered)"
-    fi
-    echo "stopped" > "$demo_dir/status"
-    echo "Demo '$name' has been shut down."
+        if [ "$status" != "running" ]; then
+            echo "Error: demo '$name' is not running (status: $status)" >&2
+            exit_code=1
+            continue
+        fi
+
+        echo "Stopping demo '$name'..."
+        echo "stopping" > "$demo_dir/status"
+        if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
+            echo "Warning: Could not stop systemd-nspawn@${name}.service (may not be running)"
+        fi
+        if ! systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null; then
+            echo "Warning: Could not disable systemd-nspawn@${name}.service (may not be registered)"
+        fi
+        echo "stopped" > "$demo_dir/status"
+        echo "Demo '$name' has been stopped."
+    done
+    return $exit_code
 }
 
 ###############################################################################
-# democtl boot
+# democtl start
 ###############################################################################
-cmd_boot() {
+cmd_start() {
     ensure_root "$@"
-    local name="${1:?Error: demo name required}"
-
-    local demo_dir="$ACTIVE_DIR/$name"
-    if [ ! -d "$demo_dir" ]; then
-        echo "Error: demo '$name' not found" >&2
+    if [ $# -eq 0 ]; then
+        echo "Error: at least one demo name required" >&2
+        echo "Usage: democtl start <name> [name ...]" >&2
         return 1
     fi
 
-    local status
-    status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
-
-    if [ "$status" = "running" ]; then
-        echo "Error: demo '$name' is already running" >&2
-        return 1
-    fi
-
-    # Ensure image symlink exists
-    if [ -f "/run/iiab-ramfs/${name}.raw" ]; then
-        ln -sf "/run/iiab-ramfs/${name}.raw" "/var/lib/machines/${name}.raw"
-    fi
-
-    if [ ! -f "/var/lib/machines/${name}.raw" ]; then
-        echo "Error: Image not found for demo '$name'" >&2
-        return 1
-    fi
-
-    echo "Booting demo '$name'..."
-    systemctl enable --now "systemd-nspawn@${name}.service"
-
-    # Poll for actual container startup
-    sleep 3
-    local poll_count=0
-    local poll_max=15
-    while [ $poll_count -lt $poll_max ]; do
-        if systemctl is-active --quiet "machine-${name}.service" 2>/dev/null || \
-           systemctl is-active --quiet "systemd-nspawn@${name}.service" 2>/dev/null; then
-            break
+    local exit_code=0
+    for name in "$@"; do
+        local demo_dir="$ACTIVE_DIR/$name"
+        if [ ! -d "$demo_dir" ]; then
+            echo "Error: demo '$name' not found" >&2
+            exit_code=1
+            continue
         fi
-        poll_count=$((poll_count + 1))
-        sleep 1
+
+        local status
+        status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+
+        if [ "$status" = "running" ]; then
+            echo "Error: demo '$name' is already running" >&2
+            exit_code=1
+            continue
+        fi
+
+        # Ensure image symlink exists
+        if [ -f "/run/iiab-ramfs/${name}.raw" ]; then
+            ln -sf "/run/iiab-ramfs/${name}.raw" "/var/lib/machines/${name}.raw"
+        fi
+
+        if [ ! -f "/var/lib/machines/${name}.raw" ]; then
+            echo "Error: Image not found for demo '$name'" >&2
+            exit_code=1
+            continue
+        fi
+
+        echo "Starting demo '$name'..."
+        echo "starting" > "$demo_dir/status"
+        systemctl daemon-reload
+        if ! systemctl enable --now "systemd-nspawn@${name}.service" 2>/dev/null; then
+            echo "Warning: systemctl enable --now returned non-zero (container may still start, polling for status...)"
+        fi
+
+        # Poll for actual container startup
+        sleep 3
+        local poll_count=0
+        local poll_max=20
+        local container_active=false
+        while [ $poll_count -lt $poll_max ]; do
+            local substate=""
+            substate=$(systemctl show "systemd-nspawn@${name}.service" --property=SubState --value 2>/dev/null || echo "")
+            if [ "$substate" = "running" ] || [[ "$substate" == *"=running" ]]; then
+                container_active=true
+                break
+            fi
+            if [ "$substate" = "auto-restart" ] || [[ "$substate" == *"=auto-restart" ]]; then
+                break
+            fi
+            poll_count=$((poll_count + 1))
+            sleep 1
+        done
+
+        if ! $container_active; then
+            echo "Error: Container did not become active within ${poll_max}s" >&2
+            echo "failed" > "$demo_dir/status"
+            exit_code=1
+            continue
+        fi
+
+        # Regenerate nginx config and apply network isolation after successful start
+        log_demo "$name" "Updating nginx configuration..."
+        if [ -x "$SCRIPT_DIR/nginx-gen.sh" ]; then
+            bash "$SCRIPT_DIR/nginx-gen.sh"
+        fi
+
+        log_demo "$name" "Ensuring network isolation rules..."
+        add_container_isolation
+
+        echo "running" > "$demo_dir/status"
+        echo "Demo '$name' is now running!"
     done
-
-    if [ $poll_count -eq $poll_max ]; then
-        echo "Error: Container did not become active within ${poll_max}s" >&2
-        return 1
-    fi
-
-    echo "running" > "$demo_dir/status"
-    echo "Demo '$name' is now running!"
+    return $exit_code
 }
 
 ###############################################################################
-# democtl reboot
+# democtl restart
 ###############################################################################
-cmd_reboot() {
+cmd_restart() {
     ensure_root "$@"
-    local name="${1:?Error: demo name required}"
-
-    local demo_dir="$ACTIVE_DIR/$name"
-    if [ ! -d "$demo_dir" ]; then
-        echo "Error: demo '$name' not found" >&2
+    if [ $# -eq 0 ]; then
+        echo "Error: at least one demo name required" >&2
+        echo "Usage: democtl restart <name> [name ...]" >&2
         return 1
     fi
 
-    local status
-    status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
-
-    if [ "$status" != "running" ]; then
-        echo "Error: demo '$name' is not running (status: $status)" >&2
-        return 1
-    fi
-
-    echo "Rebooting demo '$name'..."
-    systemctl restart "systemd-nspawn@${name}.service"
-
-    # Poll for actual container startup
-    sleep 3
-    local poll_count=0
-    local poll_max=15
-    while [ $poll_count -lt $poll_max ]; do
-        if systemctl is-active --quiet "machine-${name}.service" 2>/dev/null || \
-           systemctl is-active --quiet "systemd-nspawn@${name}.service" 2>/dev/null; then
-            break
+    local exit_code=0
+    for name in "$@"; do
+        local demo_dir="$ACTIVE_DIR/$name"
+        if [ ! -d "$demo_dir" ]; then
+            echo "Error: demo '$name' not found" >&2
+            exit_code=1
+            continue
         fi
-        poll_count=$((poll_count + 1))
-        sleep 1
+
+        local status
+        status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+
+        if [ "$status" != "running" ]; then
+            echo "Error: demo '$name' is not running (status: $status)" >&2
+            exit_code=1
+            continue
+        fi
+
+        echo "Restarting demo '$name'..."
+        echo "stopping" > "$demo_dir/status"
+        systemctl restart "systemd-nspawn@${name}.service"
+
+        # Poll for actual container startup
+        sleep 3
+        local poll_count=0
+        local poll_max=20
+        local container_active=false
+        while [ $poll_count -lt $poll_max ]; do
+            local substate=""
+            substate=$(systemctl show "systemd-nspawn@${name}.service" --property=SubState --value 2>/dev/null || echo "")
+            if [ "$substate" = "running" ] || [[ "$substate" == *"=running" ]]; then
+                container_active=true
+                break
+            fi
+            if [ "$substate" = "auto-restart" ] || [[ "$substate" == *"=auto-restart" ]]; then
+                break
+            fi
+            poll_count=$((poll_count + 1))
+            sleep 1
+        done
+
+        if ! $container_active; then
+            echo "Error: Container did not become active within ${poll_max}s after restart" >&2
+            echo "failed" > "$demo_dir/status"
+            exit_code=1
+            continue
+        fi
+
+        echo "starting" > "$demo_dir/status"
+        # Regenerate nginx and reapply isolation after restart
+        if [ -x "$SCRIPT_DIR/nginx-gen.sh" ]; then
+            bash "$SCRIPT_DIR/nginx-gen.sh"
+        fi
+        add_container_isolation
+
+        echo "running" > "$demo_dir/status"
+        echo "Demo '$name' has been restarted and is running!"
     done
-
-    if [ $poll_count -eq $poll_max ]; then
-        echo "Error: Container did not become active within ${poll_max}s after reboot" >&2
-        return 1
-    fi
-
-    echo "Demo '$name' has been rebooted and is running!"
+    return $exit_code
 }
 
 ###############################################################################
@@ -1306,22 +1376,22 @@ Usage: democtl <command> [args]
 
 Commands:
   init                          Bootstrap host (install packages, network, nginx)
-  add <name> [flags]            Add a demo (builds in background by default)
-  remove <name>                 Stop and delete a demo
-  rebuild <name>                Remove and re-add a demo
+  build <name> [flags]          Build a demo (leaves it stopped; use --start to bring online)
+  remove <name> [name ...]      Stop and delete demo(s)
+  rebuild <name> [name ...]     Remove and re-build demo(s)
   list                          Show all demos
-  status <name>                 Detailed status for a demo
-  logs <name>                   Show build log or container journal
+  status <name> [name ...]      Detailed status for demo(s)
+  logs <name> [name ...]        Show build log or container journal for demo(s)
   shell <name>                  Open shell in container
-  shutdown <name>               Stop a running demo
-  boot <name>                   Start a stopped demo
-  reboot <name>                 Restart a running demo
+  stop <name> [name ...]        Stop running demo(s)
+  start <name> [name ...]       Start stopped demo(s)
+  restart <name> [name ...]     Restart running demo(s)
   reload                        Regenerate nginx config from active demos
   ramfs <action> [name]         Manage RAM-loaded images (load/unload/status/cleanup)
-  settle [timeout]              Wait until all demos are running or failed (default: 60min)
+  settle [timeout]              Wait until all demos reach a settled state (running/stopped/failed)
   reconcile                     Fix resource counter drift and check ghost IPs
 
-Add flags:
+Build flags:
   --repo <url>              IIAB git repo (default: github.com/iiab/iiab.git)
   --branch <ref>            Git branch/tag/ref (default: master)
   --size <MB>               Image size (default: 15000)
@@ -1331,18 +1401,21 @@ Add flags:
   --wildcard                Use as wildcard for unknown subdomains
   --description <text>      Human-readable description
   --build-on-disk           Build on disk instead of RAM (default: build in RAM)
+  --start                   Start the demo after build completes (default: leave stopped)
   --fg                      Build in foreground (default: background)
 
 Examples:
   democtl init
-  democtl add small --local-vars vars/local_vars_small.yml --size 12000
-  democtl add pr3612 --local-vars vars/local_vars_large.yml --branch refs/pull/3612/head --volatile yes
+  democtl build small --local-vars vars/local_vars_small.yml --size 12000
+  democtl build pr3612 --local-vars vars/local_vars_large.yml --branch refs/pull/3612/head --volatile yes
+  democtl build mydemo --start    # build and immediately start
   democtl list
   democtl status small
-  democtl shutdown small
-  democtl boot small
-  democtl reboot small
+  democtl stop small
+  democtl start small
+  democtl restart small
   democtl remove pr3612
+  democtl start small medium large
 EOF
 }
 
@@ -1355,16 +1428,16 @@ main() {
 
     case "$cmd" in
         init)      cmd_init "$@" ;;
-        add)       cmd_add "$@" ;;
+        build)     cmd_build "$@" ;;
         remove)    cmd_remove "$@" ;;
         rebuild)   cmd_rebuild "$@" ;;
         list)      cmd_list "$@" ;;
         status)    cmd_status "$@" ;;
         logs)      cmd_logs "$@" ;;
         shell)     cmd_shell "$@" ;;
-        shutdown)  cmd_shutdown "$@" ;;
-        boot)      cmd_boot "$@" ;;
-        reboot)    cmd_reboot "$@" ;;
+        stop)      cmd_stop "$@" ;;
+        start)     cmd_start "$@" ;;
+        restart)   cmd_restart "$@" ;;
         reload)    cmd_reload "$@" ;;
         ramfs)     cmd_ramfs "$@" ;;
         settle)    cmd_settle "$@" ;;

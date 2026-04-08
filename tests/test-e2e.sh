@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-e2e.sh - End-to-end tests for democtl demo lifecycle
-# Tests: add, list, status, remove, rebuild, and config validation
+# Tests: build, list, status, remove, rebuild, and config validation
 # Note: These tests require root and simulate full demo operations
 # shellcheck disable=SC2329
 set -euo pipefail
@@ -133,7 +133,7 @@ EXIT_CODE=$?
 
 assert_equals "0" "$EXIT_CODE" "Help command exits successfully"
 assert_contains "$OUTPUT" "Usage:" "Help shows usage"
-assert_contains "$OUTPUT" "add" "Help shows add command"
+assert_contains "$OUTPUT" "build" "Help shows build command"
 assert_contains "$OUTPUT" "remove" "Help shows remove command"
 assert_contains "$OUTPUT" "list" "Help shows list command"
 
@@ -154,7 +154,7 @@ echo ""
 echo "Test 3: Demo creation with minimal config"
 setup_test_env
 
-# Manually create a demo config (simulating what 'add' does without the build)
+# Manually create a demo config (simulating what 'build' does without the actual build)
 DEMO_DIR="$ACTIVE_DIR/test-demo"
 mkdir -p "$DEMO_DIR"
 cat > "$DEMO_DIR/config" << EOF

@@ -7,30 +7,31 @@
 help:
 	bash democtl help
 
-# Full one-time setup: init → add demos → wait for builds → obtain SSL certs
+# Full one-time setup: init → build demos → wait for builds → start → obtain SSL certs
 install:
 	bash democtl init
 	make small medium large
 	bash democtl settle
+	bash democtl start small medium large
 	bash scripts/certbot-setup.sh
 
 # Host bootstrap (packages, network, nginx)
 init:
 	bash democtl init
 
-# Convenience targets -- add a single demo
+# Convenience targets -- build a single demo
 small:
-	bash democtl add small \
+	bash democtl build small \
 		--size 12000 \
 		--local-vars vars/local_vars_small.yml
 
 medium:
-	bash democtl add medium \
+	bash democtl build medium \
 		--size 20000 \
 		--local-vars vars/local_vars_medium.yml
 
 large:
-	bash democtl add large \
+	bash democtl build large \
 		--size 30000 \
 		--wildcard \
 		--local-vars vars/local_vars_large.yml
@@ -88,7 +89,7 @@ stop:
 		[ -d "$$dir" ] || continue; \
 		name=$$(basename "$$dir"); \
 		echo "Stopping $$name..."; \
-		machinectl terminate "$$name" 2>/dev/null || true; \
+		bash democtl stop "$$name" 2>/dev/null || true; \
 	done
 
 # Full cleanup
