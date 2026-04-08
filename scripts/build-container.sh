@@ -28,7 +28,6 @@ LOCAL_VARS=""
 IMAGE_SOURCE=""
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
-SKIP_NFTABLES=false
 CONFIG_PATH=""
 
 # Parse arguments
@@ -45,7 +44,6 @@ while [[ $# -gt 0 ]]; do
         --image-source) IMAGE_SOURCE="$2"; shift 2 ;;
         --build-on-disk) BUILD_ON_DISK=true; shift ;;
         --skip-install) SKIP_INSTALL=true; shift ;;
-        --skip-nftables) SKIP_NFTABLES=true; shift ;;
         --config)     CONFIG_PATH="$2"; shift 2 ;;
         *)
             echo "Warning: Unknown option: $1" >&2
@@ -345,8 +343,8 @@ else
     sysctl -w net.ipv4.ip_forward=1
 
     # Set up NAT/masquerade and isolation rules
-    if $SKIP_NFTABLES; then
-        echo "=== nftables setup SKIPPED (--skip-nftables) ==="
+    if [ "${IIAB_SKIP_NFTABLES:-}" = "true" ]; then
+        echo "=== nftables setup SKIPPED (IIAB_SKIP_NFTABLES=true) ==="
     else
         EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
         if [ -n "$EXT_IF" ]; then

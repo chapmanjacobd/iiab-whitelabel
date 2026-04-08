@@ -151,20 +151,24 @@ fi
 # 6. Configure nftables for container NAT (idempotent)
 ###############################################################################
 echo ""
-echo "=== Configuring nftables for container NAT ==="
-
-EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-if [ -z "$EXT_IF" ]; then
-    echo "Warning: Could not detect external interface, skipping networking" >&2
+if [ "${IIAB_SKIP_NFTABLES:-}" = "true" ]; then
+    echo "=== nftables SKIPPED (IIAB_SKIP_NFTABLES=true) ==="
 else
-    setup_nftables_nat "$EXT_IF"
-    add_container_isolation
-fi
+    echo "=== Configuring nftables for container NAT ==="
 
-# Make nftables persistent
-mkdir -p /etc/nftables
-nft list ruleset > /etc/nftables.conf
-echo "nftables rules saved to /etc/nftables.conf"
+    EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+    if [ -z "$EXT_IF" ]; then
+        echo "Warning: Could not detect external interface, skipping networking" >&2
+    else
+        setup_nftables_nat "$EXT_IF"
+        add_container_isolation
+    fi
+
+    # Make nftables persistent
+    mkdir -p /etc/nftables
+    nft list ruleset > /etc/nftables.conf
+    echo "nftables rules saved to /etc/nftables.conf"
+fi
 
 ###############################################################################
 # 7. Create required directories (idempotent)

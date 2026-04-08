@@ -68,6 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    env:
+      IIAB_SKIP_NFTABLES: "true"
     steps:
       - uses: actions/checkout@v6
 
@@ -81,7 +83,7 @@ jobs:
 
       - name: Build unittest demo
         run: |
-          sudo ./democtl build unittest --start --skip-nftables \
+          sudo ./democtl build unittest --start \
             --size 4000 \
             --local-vars vars/local_vars_unittest.yml \
             --fg --repo github.com/chapmanjacobd/iiab --branch rpi_image/genericvm
