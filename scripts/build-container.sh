@@ -278,11 +278,13 @@ echo "$NAME" > "$MOUNT_DIR/etc/hostname"
 ln -sf /usr/lib/systemd/system/multi-user.target "$MOUNT_DIR/etc/systemd/system/default.target"
 
 # Configure container IP via systemd-networkd inside the image
-# The ve-* interface is created by nspawn --network-veth on the host side
+# With --network-bridge, nspawn creates a veth pair:
+#   host side: vb-<machine> bridged to iiab-br0
+#   container side: host0
 mkdir -p "$MOUNT_DIR/etc/systemd/network"
 cat > "$MOUNT_DIR/etc/systemd/network/ve-default.network" << EOF
 [Match]
-Name=ve-* host-* eth0
+Name=host0 host-* eth0 ve-*
 
 [Network]
 Address=$IP/24
@@ -345,12 +347,6 @@ else
     # Set up NAT/masquerade and isolation rules
     EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
     if [ -n "$EXT_IF" ]; then
-        # Docker sets FORWARD policy DROP; insert allow rules for IIAB bridge if needed
-        if iptables-save -t filter 2>/dev/null | grep -q "^:FORWARD DROP"; then
-            iptables -I FORWARD 1 -i "$IIAB_BRIDGE" -j ACCEPT 2>/dev/null || true
-            iptables -I FORWARD 2 -o "$IIAB_BRIDGE" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-        fi
-
         setup_nftables_nat "$EXT_IF"
         add_container_isolation
     fi
