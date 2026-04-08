@@ -108,11 +108,6 @@ Kind=bridge
 [Bridge]
 DefaultPVID=
 VLANFiltering=false
-
-[Network]
-Address=${IIAB_GW}/24
-IPForward=yes
-IPMasquerade=yes
 EOF
     netdev_changed=true
 else

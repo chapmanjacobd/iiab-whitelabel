@@ -113,10 +113,10 @@ add_container_isolation() {
         iptables -A FORWARD -i "ve-+" -o "$bridge" -d "$host_ip" -j ACCEPT
     fi
 
-    # Allow established return traffic from host to containers
-    if ! iptables-save | grep -q "\-i $bridge.*-o ve-+.*-s $host_ip.*RELATED,ESTABLISHED.*ACCEPT" 2>/dev/null; then
-        echo "Adding host-to-container established rule..."
-        iptables -A FORWARD -i "$bridge" -o "ve-+" -s "$host_ip" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    # Allow host to reach container(s) (needed for nginx reverse proxy and health checks)
+    if ! iptables-save | grep -q "\-i $bridge.*-o ve-+.*-s $host_ip.*ACCEPT" 2>/dev/null; then
+        echo "Adding host-to-container forward rule..."
+        iptables -A FORWARD -i "$bridge" -o "ve-+" -s "$host_ip" -j ACCEPT
     fi
 
     # Block all container-to-container traffic on the bridge
