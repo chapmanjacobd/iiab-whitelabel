@@ -77,11 +77,11 @@ jobs:
           sudo apt-get install -y systemd-container debootstrap parted jq e2fsprogs dosfstools psmisc nftables bridge-utils expect curl git
 
       - name: Initialize host
-        run: sudo IIAB_SKIP_NFTABLES=true ./democtl init
+        run: sudo ./democtl init
 
       - name: Build unittest demo
         run: |
-          sudo IIAB_SKIP_NFTABLES=true ./democtl build unittest --start \
+          sudo ./democtl build unittest --start \
             --size 4000 \
             --local-vars vars/local_vars_unittest.yml \
             --fg --repo github.com/chapmanjacobd/iiab --branch rpi_image/genericvm

@@ -343,14 +343,10 @@ else
     sysctl -w net.ipv4.ip_forward=1
 
     # Set up NAT/masquerade and isolation rules
-    if [ "${IIAB_SKIP_NFTABLES:-}" = "true" ]; then
-        echo "=== nftables setup SKIPPED (IIAB_SKIP_NFTABLES=true) ==="
-    else
-        EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-        if [ -n "$EXT_IF" ]; then
-            setup_nftables_nat "$EXT_IF"
-            add_container_isolation
-        fi
+    EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+    if [ -n "$EXT_IF" ]; then
+        setup_nftables_nat "$EXT_IF"
+        add_container_isolation
     fi
 
     systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force
