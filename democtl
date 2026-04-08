@@ -397,8 +397,9 @@ cmd_add() {
         return 1
     fi
 
-    # Validate local-vars path exists early (before acquiring lock)
-    if [ -n "$local_vars" ] && [ ! -f "$local_vars" ]; then
+    # Validate local-vars path: only check absolute paths exist early (before acquiring lock).
+    # Relative paths are deferred to build time — they may live inside the IIAB repo.
+    if [ -n "$local_vars" ] && [[ "$local_vars" == /* ]] && [ ! -f "$local_vars" ]; then
         echo "Error: local-vars file not found: $local_vars" >&2
         return 1
     fi
