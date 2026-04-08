@@ -109,11 +109,11 @@ jobs:
             ip addr
             ip route
             brctl show || true
-            iptables-save | grep -v 'TOKEN'
+            sudo iptables-save | grep -v 'TOKEN'
             echo "--- Container status ---"
             sudo ./democtl status unittest || true
             echo "--- Container interface state (host side) ---"
-            ip addr show ve-unittest || true
+            ip addr show vb-unittest || true
             echo "--- Container service state ---"
             systemctl show "systemd-nspawn@unittest.service" --property=ActiveState,SubState,ExecMainStatus 2>&1 || true
             echo "--- Last 20 lines of container journal ---"
