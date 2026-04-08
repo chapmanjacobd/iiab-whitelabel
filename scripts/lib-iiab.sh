@@ -80,10 +80,11 @@ setup_iptables_nat() {
         echo "NAT masquerade already configured"
     fi
 
-    if ! iptables-save | grep -q "\-i ve-+.*-o $ext_if.*ACCEPT" 2>/dev/null; then
+    # Use -I FORWARD 1 to ensure rules are above any Docker/system rules
+    if ! iptables-save | grep -q "\-i $ext_if.*-o ve-+.*ACCEPT" 2>/dev/null; then
         echo "Adding container forwarding rules..."
-        iptables -A FORWARD -i ve-+ -o "$ext_if" -j ACCEPT
-        iptables -A FORWARD -i "$ext_if" -o ve-+ -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -I FORWARD 1 -i "$ext_if" -o "ve-+" -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -I FORWARD 1 -i "ve-+" -o "$ext_if" -j ACCEPT
     else
         echo "Container forwarding rules already configured"
     fi
@@ -92,38 +93,37 @@ setup_iptables_nat() {
 # Add per-container network isolation: block container-to-container traffic
 # while allowing access to the host (for nginx reverse proxy) and the internet.
 # This prevents a compromised container from attacking peers on the bridge.
-# Can be called with or without a container IP:
-#   add_container_isolation        -- Just ensure the isolation rule exists
-#   add_container_isolation <ip>   -- Also allow this specific container to reach host
 #
-# FORWARD chain ordering (critical):
+# FORWARD chain ordering (critical, achieved by reverse-order insertion):
 #   1. ACCEPT: container → host (nginx)
-#   2. ACCEPT: host → container (established)
-#   3. ACCEPT: container → internet (NAT)
-#   4. ACCEPT: internet → container (established)
-#   5. DROP:   container → container  (isolation)
+#   2. ACCEPT: host → container (health checks)
+#   3. DROP:   container → container (isolation)
+#   4. ACCEPT: container → internet (NAT)
+#   5. ACCEPT: internet → container (established)
 add_container_isolation() {
     local bridge="${IIAB_BRIDGE}"
     local host_ip="${IIAB_GW}"
 
-    # Use iptables-save for idempotency since -C doesn't support wildcards like ve-+
-    # Allow container(s) to reach the host (nginx reverse proxy)
-    if ! iptables-save | grep -q "\-i ve-+.*-o $bridge.*-d $host_ip.*ACCEPT" 2>/dev/null; then
-        echo "Adding container-to-host forward rule..."
-        iptables -A FORWARD -i "ve-+" -o "$bridge" -d "$host_ip" -j ACCEPT
-    fi
+    # Use -I FORWARD 1 to ensure rules are above any Docker/system rules.
+    # We insert them in reverse order of desired precedence.
 
-    # Allow host to reach container(s) (needed for nginx reverse proxy and health checks)
-    if ! iptables-save | grep -q "\-i $bridge.*-o ve-+.*-s $host_ip.*ACCEPT" 2>/dev/null; then
-        echo "Adding host-to-container forward rule..."
-        iptables -A FORWARD -i "$bridge" -o "ve-+" -s "$host_ip" -j ACCEPT
-    fi
-
-    # Block all container-to-container traffic on the bridge
-    # Must be AFTER the allow rules above, so container→host still works
+    # 3. Block all container-to-container traffic on the bridge
     if ! iptables-save | grep -q "\-i ve-+.*-o ve-+.*DROP" 2>/dev/null; then
         echo "Adding container-to-container isolation rule..."
-        iptables -A FORWARD -i "ve-+" -o "ve-+" -j DROP
+        iptables -I FORWARD 1 -i "ve-+" -o "ve-+" -j DROP
+    fi
+
+    # 2. Allow host to reach container(s) (needed for nginx reverse proxy and health checks)
+    # Match by source IP and output interface pattern for locally-generated packets
+    if ! iptables-save | grep -q "\-s $host_ip.*-o ve-+.*ACCEPT" 2>/dev/null; then
+        echo "Adding host-to-container forward rule..."
+        iptables -I FORWARD 1 -s "$host_ip" -o "ve-+" -j ACCEPT
+    fi
+
+    # 1. Allow container(s) to reach the host (nginx reverse proxy)
+    if ! iptables-save | grep -q "\-i ve-+.*-d $host_ip.*ACCEPT" 2>/dev/null; then
+        echo "Adding container-to-host forward rule..."
+        iptables -I FORWARD 1 -i "ve-+" -d "$host_ip" -j ACCEPT
     fi
 }
 
