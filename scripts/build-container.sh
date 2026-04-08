@@ -550,12 +550,14 @@ echo "=== Step 5: Registering container image ==="
 mkdir -p /var/lib/machines
 
 if $RAM_IMAGE; then
-    # Keep image in RAM -- mount /run/iiab-ramfs if needed
+    # Keep image in RAM -- mount /run/iiab-ramfs if needed.
+    # The tmpfs holds all demos' images, so we cap it at ~90% of host RAM.
+    # Per-image capacity checks are handled by ramfs-setup.sh.
     if ! mountpoint -q "/run/iiab-ramfs" 2>/dev/null; then
         mkdir -p "/run/iiab-ramfs"
-        ram_size=$(( (ACTUAL_SIZE_MB * 11 + 9) / 10 ))  # 10% overhead, rounded up
-        echo "Mounting tmpfs at /run/iiab-ramfs (${ram_size}MB)..."
-        mount -t tmpfs -o "size=${ram_size}M,mode=0755" tmpfs "/run/iiab-ramfs"
+        local_host_ram=$(( $(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo) * 90 / 100 ))
+        echo "Mounting tmpfs at /run/iiab-ramfs (${local_host_ram}MB)..."
+        mount -t tmpfs -o "size=${local_host_ram}M,mode=0755" tmpfs "/run/iiab-ramfs"
     fi
 
     # Move from build location to RAM image store

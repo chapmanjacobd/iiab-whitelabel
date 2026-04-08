@@ -88,3 +88,15 @@ jobs:
           sudo ./democtl status unittest
           # Check if the image exists (dereference symlink)
           sudo ls -lhL /var/lib/machines/unittest.raw
+
+      - name: Verify container responds via HTTP
+        run: |
+          # Curl the container's IP directly to verify it's actually running
+          HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 http://10.0.3.2/)
+          echo "unittest container returned HTTP $HTTP_CODE"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 400 ]; then
+            echo "ERROR: Unexpected HTTP status from unittest container" >&2
+            exit 1
+          fi
+          # Verify the response contains expected content (IIAB landing page or similar)
+          curl -sS --max-time 15 -D- http://10.0.3.2/ | head -30
