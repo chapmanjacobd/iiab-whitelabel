@@ -293,6 +293,10 @@ DNS=8.8.8.8
 DNS=1.1.1.1
 EOF
 
+# Ensure systemd-networkd is enabled in the rootfs
+ln -sf /usr/lib/systemd/system/systemd-networkd.service "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+ln -sf /usr/lib/systemd/system/systemd-resolved.service "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants/systemd-resolved.service" 2>/dev/null || true
+
 # Container and hardware-specific overrides
 cat >> "$MOUNT_DIR/etc/iiab/local_vars.yml" << 'EOF'
 is_container: True
@@ -370,6 +374,12 @@ spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=replace
 
 expect "login: " { send "root\r" }
 expect -re {#\s?$} { send "export PAGER=cat SYSTEMD_PAGER=cat\r" }
+
+# Debug: check networking
+expect -re {#\s?$} { send "ip addr\r" }
+expect -re {#\s?$} { send "ip route\r" }
+expect -re {#\s?$} { send "cat /etc/resolv.conf\r" }
+expect -re {#\s?$} { send "ping -c1 -W2 8.8.8.8\r" }
 
 # Debian cloud image prep: generate SSH host keys (Ansible starts SSH later; needed on Debian)
 expect -re {#\s?$} { send "ssh-keygen -A\r" }
