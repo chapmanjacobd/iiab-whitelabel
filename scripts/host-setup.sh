@@ -148,7 +148,7 @@ else
 fi
 
 ###############################################################################
-# 6. Clear existing firewall rules and configure nftables (idempotent)
+# 6. Configure nftables for container NAT (idempotent)
 ###############################################################################
 echo ""
 echo "=== Configuring nftables for container NAT ==="
@@ -157,36 +157,10 @@ EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
 if [ -z "$EXT_IF" ]; then
     echo "Warning: Could not detect external interface, skipping networking" >&2
 else
-    # Flush ALL existing firewall rules (iptables, ip6tables, nftables)
-    # This removes Docker's default iptables rules and any stale configuration
-    echo "Flushing all existing firewall rules..."
-
-    # Flush iptables (all tables)
-    if command -v iptables >/dev/null 2>&1; then
-        iptables -F 2>/dev/null || true
-        iptables -X 2>/dev/null || true
-        iptables -t nat -F 2>/dev/null || true
-        iptables -t nat -X 2>/dev/null || true
-        iptables -t mangle -F 2>/dev/null || true
-        iptables -t mangle -X 2>/dev/null || true
-        iptables -P INPUT ACCEPT 2>/dev/null || true
-        iptables -P FORWARD ACCEPT 2>/dev/null || true
-        iptables -P OUTPUT ACCEPT 2>/dev/null || true
-    fi
-
-    # Flush ip6tables
-    if command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -F 2>/dev/null || true
-        ip6tables -X 2>/dev/null || true
-        ip6tables -P INPUT ACCEPT 2>/dev/null || true
-        ip6tables -P FORWARD ACCEPT 2>/dev/null || true
-        ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
-    fi
-
-    # Flush nftables completely
-    nft flush ruleset 2>/dev/null || true
-
-    echo "All firewall rules cleared"
+    # Ensure our nftables tables are clean (idempotent)
+    echo "Cleaning up any existing IIAB nftables rules..."
+    nft delete table inet iiab 2>/dev/null || true
+    nft delete table bridge iiab 2>/dev/null || true
 
     setup_nftables_nat "$EXT_IF"
     add_container_isolation

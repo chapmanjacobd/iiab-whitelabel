@@ -107,21 +107,29 @@ jobs:
 
           if ! $READY; then
             echo "ERROR: Container HTTP service did not become ready after 60s" >&2
-            echo "--- Host Networking ---"
-            ip addr
-            ip route
+            echo "=== Diagnostic: Ping test ==="
+            ping -c 3 -W 2 10.0.3.2 || echo "Ping FAILED"
+            echo "=== Diagnostic: ARP table ==="
+            ip neigh show | grep 10.0.3 || echo "No ARP entries for 10.0.3.0/24"
+            echo "=== Diagnostic: Host Networking ==="
+            ip addr show iiab-br0 || echo "Bridge not found"
+            ip route show | grep 10.0.3 || echo "No route to 10.0.3.0/24"
             brctl show || true
-            sudo nft list ruleset || true
-            echo "--- Container status ---"
+            echo "=== Diagnostic: nftables ruleset ==="
+            sudo nft list ruleset || echo "No nftables rules"
+            echo "=== Diagnostic: iptables FORWARD chain ==="
+            sudo iptables -L FORWARD -n -v || echo "No iptables rules"
+            echo "=== Diagnostic: Container status ==="
             sudo ./democtl status unittest || true
-            echo "--- Container interface state (host side) ---"
+            echo "=== Diagnostic: Container interface state (host side) ==="
             ip addr show vb-unittest || true
-            echo "--- Container service state ---"
+            ip link show vb-unittest || true
+            echo "=== Diagnostic: Container service state ==="
             systemctl show "systemd-nspawn@unittest.service" --property=ActiveState,SubState,ExecMainStatus 2>&1 || true
-            echo "--- Container network namespace (ip netns exec) ---"
-            # Find the container's PID and check its network
+            echo "=== Diagnostic: Container network namespace ==="
             CONTAINER_PID=$(systemctl show "systemd-nspawn@unittest.service" --property=MainPID --value 2>/dev/null)
             if [ -n "$CONTAINER_PID" ] && [ "$CONTAINER_PID" != "0" ]; then
+              echo "Container PID: $CONTAINER_PID"
               sudo nsenter -t "$CONTAINER_PID" -n ip addr 2>/dev/null || true
               sudo nsenter -t "$CONTAINER_PID" -n ip route 2>/dev/null || true
               sudo nsenter -t "$CONTAINER_PID" -n cat /etc/resolv.conf 2>/dev/null || true
@@ -129,9 +137,11 @@ jobs:
               sudo nsenter -t "$CONTAINER_PID" -n curl -sS -D- --max-time 5 http://127.0.0.1/ 2>&1 | head -30 || true
               echo "--- Follow redirect ---"
               sudo nsenter -t "$CONTAINER_PID" -n curl -sS -D- -L --max-time 10 http://127.0.0.1/ 2>&1 | head -30 || true
+              echo "--- Container listening on port 80 ---"
+              sudo nsenter -t "$CONTAINER_PID" -n ss -tlnp | grep :80 || echo "Nothing listening on port 80"
             fi
-            echo "--- Last 20 lines of container journal ---"
-            journalctl -u "systemd-nspawn@unittest.service" --no-pager -n 20 2>&1 || true
+            echo "=== Diagnostic: Last 30 lines of container journal ==="
+            journalctl -u "systemd-nspawn@unittest.service" --no-pager -n 30 2>&1 || true
             exit 1
           fi
 
