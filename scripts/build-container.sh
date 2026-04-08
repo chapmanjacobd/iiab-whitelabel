@@ -289,15 +289,17 @@ Name=host0 host-* eth0 ve-*
 [Network]
 Address=$IP/24
 Gateway=$IIAB_GW
-DNS=8.8.8.8
-DNS=1.1.1.1
+IPForward=no
 EOF
 
 # Ensure systemd-networkd is enabled in the rootfs
 ln -sf /usr/lib/systemd/system/systemd-networkd.service "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
-# Disable systemd-resolved so it doesn't overwrite resolv.conf
-rm -f "$MOUNT_DIR/etc/systemd/system/sysinit.target.wants/systemd-resolved.service" 2>/dev/null || true
-rm -f "$MOUNT_DIR/etc/systemd/system/multi-user.target.wants/systemd-resolved.service" 2>/dev/null || true
+
+# Write resolv.conf directly since we don't run systemd-resolved
+cat > "$MOUNT_DIR/etc/resolv.conf" << EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+EOF
 
 # Container and hardware-specific overrides
 cat >> "$MOUNT_DIR/etc/iiab/local_vars.yml" << 'EOF'
