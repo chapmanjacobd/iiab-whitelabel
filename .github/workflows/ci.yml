@@ -105,11 +105,18 @@ jobs:
 
           if ! $READY; then
             echo "ERROR: Container HTTP service did not become ready after 60s" >&2
-            echo "Container status:"
+            echo "--- Host Networking ---"
+            ip addr
+            ip route
+            brctl show || true
+            iptables-save | grep -v 'TOKEN'
+            echo "--- Container status ---"
             sudo ./democtl status unittest || true
-            echo "Container service state:"
+            echo "--- Container interface state (host side) ---"
+            ip addr show ve-unittest || true
+            echo "--- Container service state ---"
             systemctl show "systemd-nspawn@unittest.service" --property=ActiveState,SubState,ExecMainStatus 2>&1 || true
-            echo "Last 20 lines of container journal:"
+            echo "--- Last 20 lines of container journal ---"
             journalctl -u "systemd-nspawn@unittest.service" --no-pager -n 20 2>&1 || true
             exit 1
           fi

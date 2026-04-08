@@ -101,7 +101,6 @@ setup_iptables_nat() {
 #   4. ACCEPT: container → internet (NAT)
 #   5. ACCEPT: internet → container (established)
 add_container_isolation() {
-    local bridge="${IIAB_BRIDGE}"
     local host_ip="${IIAB_GW}"
 
     # Use -I FORWARD 1 to ensure rules are above any Docker/system rules.
@@ -114,10 +113,10 @@ add_container_isolation() {
     fi
 
     # 2. Allow host to reach container(s) (needed for nginx reverse proxy and health checks)
-    # Match by source IP and output interface pattern for locally-generated packets
-    if ! iptables-save | grep -q "\-s $host_ip.*-o ve-+.*ACCEPT" 2>/dev/null; then
+    # Match by destination subnet to cover all potential containers
+    if ! iptables-save | grep -q "\-d $IIAB_DEMO_SUBNET.*-o ve-+.*ACCEPT" 2>/dev/null; then
         echo "Adding host-to-container forward rule..."
-        iptables -I FORWARD 1 -s "$host_ip" -o "ve-+" -j ACCEPT
+        iptables -I FORWARD 1 -d "$IIAB_DEMO_SUBNET" -o "ve-+" -j ACCEPT
     fi
 
     # 1. Allow container(s) to reach the host (nginx reverse proxy)
@@ -131,6 +130,6 @@ add_container_isolation() {
 # The isolation rules are global and persistent, so this is only for teardown.
 remove_container_isolation() {
     iptables -D FORWARD -i "ve-+" -o "ve-+" -j DROP 2>/dev/null || true
-    iptables -D FORWARD -i "ve-+" -o "${IIAB_BRIDGE}" -d "${IIAB_GW}" -j ACCEPT 2>/dev/null || true
-    iptables -D FORWARD -i "${IIAB_BRIDGE}" -o "ve-+" -s "${IIAB_GW}" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -s "${IIAB_GW}" -o "ve-+" -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -i "ve-+" -d "${IIAB_GW}" -j ACCEPT 2>/dev/null || true
 }
