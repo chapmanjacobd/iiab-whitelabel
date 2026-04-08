@@ -294,8 +294,6 @@ EOF
 # Container and hardware-specific overrides
 cat >> "$MOUNT_DIR/etc/iiab/local_vars.yml" << 'EOF'
 is_container: True
-kiwix_install: True
-kiwix_enabled: True
 iiab_admin_user_install: False
 sshd_install: False
 sshd_enabled: False

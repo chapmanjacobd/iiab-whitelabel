@@ -84,34 +84,50 @@ setup_nftables_nat() {
 # Add per-container network isolation: block container-to-container traffic
 # while allowing access to the host (for nginx reverse proxy) and the internet.
 #
-# We use a priority of 'filter - 1' to ensure our rules are processed 
-# BEFORE standard iptables/Docker rules in the 'filter' table.
+# FORWARD chain ordering (critical):
+#   1. inet table (L3): Handles host access and internet NAT
+#   2. bridge table (L2): Handles intra-bridge isolation (peer-to-peer)
 add_container_isolation() {
     local host_ip="${IIAB_GW}"
     local subnet="${IIAB_DEMO_SUBNET}"
+    local bridge="${IIAB_BRIDGE}"
 
-    # Ensure the table and forward chain exist
+    # 1. L3 (inet) rules for Host/Internet access
     nft add table inet iiab 2>/dev/null || true
-    # Priority 'filter - 1' is -1 in nftables (standard filter is 0)
+    # Priority -1 ensures we run before Docker's rules
     nft add chain inet iiab forward '{ type filter hook forward priority filter - 1; policy accept; }'
 
-    # 1. Allow container(s) to reach the host (DNS, Nginx proxy)
-    nft add rule inet iiab forward iifname "{ ve-*, vb-* }" ip daddr "$host_ip" accept
+    # Clear existing rules in our chain for idempotency if called multiple times
+    nft flush chain inet iiab forward
 
-    # 2. Allow host to reach container(s) (Nginx proxy, health checks)
-    nft add rule inet iiab forward ip daddr "$subnet" oifname "{ ve-*, vb-* }" accept
-
-    # 3. Allow established return traffic from internet
+    # A. Allow established/related traffic
     nft add rule inet iiab forward ct state established,related accept
 
-    # 4. Block all container-to-container traffic on the bridge
-    nft add rule inet iiab forward iifname "{ ve-*, vb-* }" oifname "{ ve-*, vb-* }" drop
-    
-    echo "Configured nftables container isolation and host-access rules"
-}
+    # B. Allow container -> Host and Internet (NAT)
+    nft add rule inet iiab forward iifname "{ ve-*, vb-* }" accept
 
+    # C. Allow host -> container (for reverse proxy and health checks)
+    nft add rule inet iiab forward ip daddr "$subnet" oifname "{ ve-*, vb-* }" accept
+
+    # 2. L2 (bridge) rules for intra-bridge isolation
+    # This ensures isolation works even if br_netfilter is disabled on the host.
+    nft add table bridge iiab 2>/dev/null || true
+    nft add chain bridge iiab forward '{ type filter hook forward priority 0; policy accept; }'
+
+    # Flush for idempotency
+    nft flush chain bridge iiab forward
+
+    # Block intra-bridge container-to-container traffic
+    nft add rule bridge iiab forward iifname "ve-*" oifname "ve-*" drop
+    nft add rule bridge iiab forward iifname "vb-*" oifname "vb-*" drop
+    nft add rule bridge iiab forward iifname "ve-*" oifname "vb-*" drop
+    nft add rule bridge iiab forward iifname "vb-*" oifname "ve-*" drop
+
+    echo "Configured nftables isolation (bridge) and host-access (inet) rules"
+}
 # Remove all IIAB nftables rules
 remove_container_isolation() {
     nft delete table inet iiab 2>/dev/null || true
+    nft delete table bridge iiab 2>/dev/null || true
     echo "Removed IIAB nftables configuration"
 }
