@@ -293,7 +293,7 @@ EOF
 
 # Container and hardware-specific overrides
 cat >> "$MOUNT_DIR/etc/iiab/local_vars.yml" << 'EOF'
-is_VM: True
+is_container: True
 iiab_admin_user_install: False
 sshd_install: False
 sshd_enabled: False
