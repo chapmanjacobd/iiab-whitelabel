@@ -359,6 +359,22 @@ else
     cat > "$MOUNT_DIR/root/run_build.sh" << 'EOF_SCRIPT'
 #!/bin/bash
 set -euo pipefail
+
+# Wait for network to be configured by systemd-networkd
+echo "=== Network diagnostics ==="
+ip addr show 2>&1 || true
+ip route show 2>&1 || true
+cat /etc/resolv.conf 2>&1 || true
+echo "=== Waiting for default route... ==="
+for i in $(seq 1 30); do
+    if ip route show | grep -q default; then
+        echo "Network ready (attempt $i)"
+        break
+    fi
+    echo "  Waiting for network... ($i)"
+    sleep 2
+done
+
 apt update
 DEBIAN_FRONTEND=noninteractive apt upgrade -y
 curl -fLo /usr/sbin/iiab https://raw.githubusercontent.com/iiab/iiab-factory/master/iiab
