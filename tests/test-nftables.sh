@@ -197,15 +197,44 @@ for i in 2 10 100 200 253; do
     fi
 done
 
-# Test 11: nftables rule patterns (conceptual)
+# Test 11: nftables rule patterns — verify table/chain structure via nft list
 echo ""
 echo "Test 11: nftables rule design validation"
 
-# The rules should use 'inet iiab' table and 'filter - 1' priority
-echo "  ✓ PASS: nftables uses dedicated 'inet iiab' table"
-echo "  ✓ PASS: Forward chain uses 'priority filter - 1' for precedence"
-TOTAL=$((TOTAL + 2))
-PASS=$((PASS + 2))
+# Apply isolation rules so we can inspect them
+set +e
+add_container_isolation > /dev/null 2>&1
+set -e
+
+# Check that the inet iiab table and forward chain exist
+if nft list table inet iiab 2>/dev/null | grep -q "type filter hook forward priority -1"; then
+    assert_true "true" "Forward chain uses priority filter - 1"
+else
+    assert_true "false" "Forward chain uses priority filter - 1"
+fi
+
+# Check that the bridge iiab table exists with forward chain
+if nft list table bridge iiab 2>/dev/null | grep -q "type filter hook forward"; then
+    assert_true "true" "Bridge isolation table has forward chain"
+else
+    assert_true "false" "Bridge isolation table has forward chain"
+fi
+
+# Verify container-to-container drop rules exist
+BRIDGE_RULES=$(nft list chain bridge iiab forward 2>/dev/null || echo "")
+if echo "$BRIDGE_RULES" | grep -q "drop"; then
+    assert_true "true" "Bridge chain has container-to-container drop rules"
+else
+    assert_true "false" "Bridge chain has container-to-container drop rules"
+fi
+
+# Verify inet forward has allow rules for host and internet
+INET_FORWARD=$(nft list chain inet iiab forward 2>/dev/null || echo "")
+if echo "$INET_FORWARD" | grep -q "accept"; then
+    assert_true "true" "Inet forward chain has accept rules"
+else
+    assert_true "false" "Inet forward chain has accept rules"
+fi
 
 # Test 12: Network interface naming convention
 echo ""

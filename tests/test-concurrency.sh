@@ -173,7 +173,8 @@ ensure_state_dirs
 allocate_and_register_ip() {
     local ip
     ip=$(next_ip)
-    local name="demo-$(echo "$ip" | tr '.' '-')"
+    local name
+    name="demo-$(echo "$ip" | tr '.' '-')"
     mkdir -p "$ACTIVE_DIR/$name"
     echo "$ip" > "$ACTIVE_DIR/$name/ip"
     cat > "$ACTIVE_DIR/$name/config" << EOF
