@@ -106,9 +106,10 @@ grow_storage_file() {
     local needed_mb="$1"
     local current_size_gb=0
     if [ -f "$STORAGE_BTRFS" ]; then
-        # Get current file size in GB
-        current_size_gb=$(du -sb "$STORAGE_BTRFS" 2>/dev/null | cut -f1 || echo 0)
-        current_size_gb=$(( current_size_gb / 1073741824 ))  # bytes -> GB
+        # Get current file size in GB (stat reports virtual size, not disk usage)
+        local size_bytes
+        size_bytes=$(stat -c%s "$STORAGE_BTRFS" 2>/dev/null || echo 0)
+        current_size_gb=$(( size_bytes / 1073741824 ))  # bytes -> GB
     fi
 
     # Calculate needed size: current usage + needed_mb + 2GB headroom
@@ -174,19 +175,13 @@ cleanup() {
         echo "Cleanup: removing failed build snapshot $NAME"
         btrfs subvolume delete "$BUILDS_DIR/$NAME" >/dev/null 2>&1 || true
     fi
-    # Unmount storage if we mounted it
-    if [ "${DID_MOUNT:-false}" = "true" ] && mountpoint -q "$STORAGE_ROOT" 2>/dev/null; then
-        umount -l "$STORAGE_ROOT" 2>/dev/null || true
-    fi
+    # Note: storage mount is intentionally left mounted here -- it may be shared
+    # across builds. The OS cleans up tmpfs mounts on process exit.
 }
 trap cleanup EXIT
 
-# Mount storage if not already mounted
+# Ensure storage is mounted (ensure_storage is idempotent; returns immediately if already mounted)
 ensure_storage
-if ! mountpoint -q "$STORAGE_ROOT" 2>/dev/null; then
-    mount -o "$MOUNT_OPTS" "$STORAGE_BTRFS" "$STORAGE_ROOT"
-    DID_MOUNT=true
-fi
 mkdir -p "$BUILDS_DIR"
 
 # Grow storage if needed (after mount, so btrfs filesystem df works)
@@ -324,49 +319,57 @@ else
     fi
 fi
 
-# Resolve local_vars path
-if [ -n "$LOCAL_VARS" ]; then
-    if [[ "$LOCAL_VARS" != /* ]] && [ -f "$LOCAL_VARS" ]; then
+# Resolve local_vars path: three sources are checked in order
+#   1. Absolute host path (--local-vars /full/path.yml) -- copied directly
+#   2. Relative host path (--local-vars vars/foo.yml) -- copied into container repo, then used
+#   3. Path inside the IIAB repo (relative path not found on host, or default)
+resolve_local_vars() {
+    if [ -z "$LOCAL_VARS" ]; then
+        # Default: vars/local_vars_<name>.yml inside the IIAB repo
+        IIAB_VARS_PATH="vars/local_vars_${NAME}.yml"
+        return 0
+    fi
+
+    if [[ "$LOCAL_VARS" == /* ]]; then
+        # Absolute host path -- will be copied directly later
+        if [ ! -f "$LOCAL_VARS" ]; then
+            echo "Error: local-vars file not found: $LOCAL_VARS" >&2
+            return 1
+        fi
+        echo "Using local_vars from host absolute path: $LOCAL_VARS"
+        cp --preserve=mode,timestamps "$LOCAL_VARS" "$BUILD_SUBVOL/etc/iiab/local_vars.yml"
+        return 0
+    fi
+
+    # Relative path: check if it exists on the host first
+    if [ -f "$LOCAL_VARS" ]; then
         RELATIVE_VARS_DIR=$(dirname "$LOCAL_VARS")
         mkdir -p "$BUILD_SUBVOL/opt/iiab/iiab/$RELATIVE_VARS_DIR"
         cp --preserve=mode,timestamps "$LOCAL_VARS" "$BUILD_SUBVOL/opt/iiab/iiab/$LOCAL_VARS"
+        echo "Copied local_vars from host relative path: $LOCAL_VARS"
         IIAB_VARS_PATH="$LOCAL_VARS"
-        echo "Copied local_vars from host: $LOCAL_VARS → IIAB repo in image"
-    elif [[ "$LOCAL_VARS" != /* ]]; then
+    else
+        # Not on host -- will look inside the IIAB repo
         IIAB_VARS_PATH="$LOCAL_VARS"
-    elif [[ "$LOCAL_VARS" == /* ]]; then
-        IIAB_VARS_PATH=""
     fi
-elif [ -z "$LOCAL_VARS" ]; then
-    IIAB_VARS_PATH="vars/local_vars_${NAME}.yml"
-fi
+}
 
-# Install IIAB configuration
+resolve_local_vars
+
+# Ensure the target directory exists
 mkdir -p "$BUILD_SUBVOL/etc/iiab"
 
-IIAB_VARS_FOUND=false
-if [ -n "$IIAB_VARS_PATH" ]; then
+# If IIAB_VARS_PATH is set, try to copy from the IIAB repo inside the container
+if [ -n "${IIAB_VARS_PATH:-}" ]; then
     IIAB_VARS_CONTAINER_PATH="$BUILD_SUBVOL/opt/iiab/iiab/$IIAB_VARS_PATH"
     if [ -f "$IIAB_VARS_CONTAINER_PATH" ]; then
         echo "Copying local_vars from IIAB repo: $IIAB_VARS_PATH"
         cp --preserve=mode,timestamps "$IIAB_VARS_CONTAINER_PATH" "$BUILD_SUBVOL/etc/iiab/local_vars.yml"
-        IIAB_VARS_FOUND=true
     else
         echo "Error: local_vars not found at $IIAB_VARS_PATH in IIAB repo" >&2
         echo "  Expected: $IIAB_VARS_CONTAINER_PATH" >&2
         exit 1
     fi
-fi
-
-if ! $IIAB_VARS_FOUND && [ -n "$LOCAL_VARS" ] && [[ "$LOCAL_VARS" == /* ]] && [ -f "$LOCAL_VARS" ]; then
-    echo "Using local_vars from host: $LOCAL_VARS"
-    cp --preserve=mode,timestamps "$LOCAL_VARS" "$BUILD_SUBVOL/etc/iiab/local_vars.yml"
-    IIAB_VARS_FOUND=true
-fi
-
-if ! $IIAB_VARS_FOUND; then
-    echo "Error: No valid local_vars file found" >&2
-    exit 1
 fi
 
 # Set hostname

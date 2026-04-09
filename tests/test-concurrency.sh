@@ -143,22 +143,27 @@ release_lock
 assert_equals "0" "$FIRST_LOCK" "First lock acquired"
 assert_equals "1" "$SECOND_LOCK" "Second lock rejected (concurrent access blocked)"
 
-# Test 3: Stale lock cleanup (dead process)
+# Test 3: Stale lock cleanup (flock auto-releases when process dies)
 echo ""
-echo "Test 3: Stale lock cleanup (dead process)"
+echo "Test 3: Stale lock cleanup (flock auto-releases on process death)"
 setup_test_env
 ensure_state_dirs
 
-# Create a stale lock with a fake PID (non-existent process)
-echo "999999" > "$LOCK_FILE.pid"
+# Start a background process that holds the lock, then dies
+(
+    acquire_lock 0
+    # Process exits without releasing -- flock should auto-release on exit
+    exit 0
+) &
+HOLDER_PID=$!
+wait "$HOLDER_PID" 2>/dev/null || true
 
-# Try to acquire lock (should clean up stale lock)
-acquire_lock 0 2>/dev/null
+# Lock should be released automatically when the background process died
+acquire_lock 0
 STALE_CLEANUP=$?
-
 release_lock
 
-assert_equals "0" "$STALE_CLEANUP" "Stale lock cleaned up successfully"
+assert_equals "0" "$STALE_CLEANUP" "Lock auto-released after process death (flock cleanup)"
 
 # Test 4: IP allocation uniqueness
 echo ""

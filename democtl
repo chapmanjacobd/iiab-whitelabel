@@ -130,6 +130,7 @@ load_resources() {
 save_resources() {
     cat > "$RESOURCE_FILE" << EOF
 DISK_TOTAL=${DISK_TOTAL:-0}
+DISK_ALLOCATED=${DISK_ALLOCATED:-0}
 EOF
 }
 
@@ -361,20 +362,17 @@ cmd_build() {
 
     # Acquire lock for: check resources → allocate → assign IP → write config
     acquire_lock 0 || return 1
-    trap release_lock EXIT
 
     # Check if demo already exists (under lock)
     if [ -d "$ACTIVE_DIR/$name" ]; then
         echo "Error: demo '$name' already exists. Use 'democtl rebuild $name' to recreate." >&2
         release_lock
-        trap - EXIT
         return 1
     fi
 
     # Resource pre-flight (under lock)
     if ! check_resources "$name" "$size_mb" "$build_on_disk"; then
         release_lock
-        trap - EXIT
         return 1
     fi
 
@@ -407,7 +405,6 @@ EOF
 
     # Release lock -- the build runs independently now
     release_lock
-    trap - EXIT
 
     local subdomain
     subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
@@ -628,7 +625,6 @@ cmd_remove() {
 
         # Acquire lock for: read config → cleanup
         acquire_lock 0 || { exit_code=1; continue; }
-        trap release_lock EXIT
 
         # Delete the btrfs subvolume if it exists
         local storage_mount=""
@@ -653,7 +649,6 @@ cmd_remove() {
 
         # Release lock
         release_lock
-        trap - EXIT
 
         echo "Demo '$name' removed."
     done
@@ -703,24 +698,74 @@ cmd_rebuild() {
         echo "Demos to rebuild: ${names[*]}"
         echo ""
 
-        # Stop all running containers
-        echo "=== Stopping all containers ==="
+        # Phase 1: Kill any running builds/watchdogs first
+        echo "=== Cancelling in-progress builds ==="
         for name in "${names[@]}"; do
             local demo_dir="$ACTIVE_DIR/$name"
-            local status
-            status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
-            if [ "$status" = "running" ] || [ "$status" = "starting" ]; then
-                echo "  Stopping $name..."
-                systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null || true
+            [ -d "$demo_dir" ] || continue
+            if [ -f "$demo_dir/build.watchdog" ]; then
+                local wpid
+                wpid=$(cat "$demo_dir/build.watchdog" 2>/dev/null || true)
+                if [ -n "$wpid" ]; then
+                    echo "  Killing build watchdog for $name (PID $wpid)..."
+                    kill "$wpid" 2>/dev/null || true
+                fi
+                rm -f "$demo_dir/build.watchdog"
+            fi
+            if [ -f "$demo_dir/build.pid" ]; then
+                local pid
+                pid=$(cat "$demo_dir/build.pid" 2>/dev/null || true)
+                if [ -n "$pid" ]; then
+                    echo "  Killing build process for $name (PID $pid)..."
+                    kill "$pid" 2>/dev/null || true
+                fi
+                rm -f "$demo_dir/build.pid"
             fi
         done
 
-        # Disable all services
+        # Phase 2: Stop all running/starting containers with a timeout
+        echo ""
+        echo "=== Stopping all containers ==="
+        for name in "${names[@]}"; do
+            local demo_dir="$ACTIVE_DIR/$name"
+            [ -d "$demo_dir" ] || continue
+            local status
+            status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+            case "$status" in
+                running|starting)
+                    echo -n "  Stopping $name... "
+                    systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null &
+                    local stop_pid=$!
+                    # Wait up to 30s for graceful stop
+                    local waited=0
+                    while kill -0 "$stop_pid" 2>/dev/null && [ "$waited" -lt 30 ]; do
+                        sleep 1
+                        waited=$((waited + 1))
+                    done
+                    if kill -0 "$stop_pid" 2>/dev/null; then
+                        echo "(timeout after 30s, force-killing)"
+                        kill -9 "$stop_pid" 2>/dev/null || true
+                        wait "$stop_pid" 2>/dev/null || true
+                        # Also kill the container directly
+                        machinectl terminate "$name" 2>/dev/null || true
+                    else
+                        echo "done."
+                    fi
+                    ;;
+                building|pending)
+                    echo "  $name is still building (will be cleaned up below)"
+                    ;;
+            esac
+        done
+        # Reap any remaining stop processes
+        wait 2>/dev/null || true
+
+        # Phase 3: Disable all services
         for name in "${names[@]}"; do
             systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null || true
         done
 
-        # Unmount storage and delete btrfs file
+        # Phase 4: Unmount storage and delete btrfs files
         echo ""
         echo "=== Tearing down storage ==="
         for storage_mount in /run/iiab-demos/storage /var/iiab-demos/storage; do
@@ -729,7 +774,17 @@ cmd_rebuild() {
                 umount -l "$storage_mount" 2>/dev/null || true
             fi
         done
-        rm -f /run/iiab-demos/storage.btrfs /var/iiab-demos/storage.btrfs
+        # Wait briefly for lazy unmounts to settle
+        sleep 1
+        # Remove storage.btrfs from both RAM and disk (whichever exists)
+        if [ -f /run/iiab-demos/storage.btrfs ]; then
+            echo "  Removing /run/iiab-demos/storage.btrfs (RAM)..."
+            rm -f /run/iiab-demos/storage.btrfs
+        fi
+        if [ -f /var/iiab-demos/storage.btrfs ]; then
+            echo "  Removing /var/iiab-demos/storage.btrfs (disk)..."
+            rm -f /var/iiab-demos/storage.btrfs
+        fi
         rm -rf /run/iiab-demos/storage /var/iiab-demos/storage
         echo "  Storage deleted."
 
@@ -1142,14 +1197,12 @@ cmd_reconcile() {
         echo "Error: another operation is in progress" >&2
         return 1
     }
-    trap release_lock EXIT
 
     # load_resources dynamically calculates allocations from active configs
     load_resources
     save_resources
 
     release_lock
-    trap - EXIT
 
     echo "Reconciled resource allocations from active demos."
     echo "  Disk allocated: ${DISK_ALLOCATED}MB"
@@ -1386,7 +1439,7 @@ cmd_restart() {
         fi
 
         echo "Restarting demo '$name'..."
-        echo "stopping" > "$demo_dir/status"
+        echo "restarting" > "$demo_dir/status"
         systemctl restart "systemd-nspawn@${name}.service"
 
         if ! _wait_for_running "$name"; then
@@ -1398,8 +1451,7 @@ cmd_restart() {
             continue
         fi
 
-        echo "starting" > "$demo_dir/status"
-        # Regenerate nginx and reapply isolation after restart
+        # Container is running -- regenerate nginx and reapply isolation
         if [ -x "$SCRIPT_DIR/nginx-gen.sh" ]; then
             bash "$SCRIPT_DIR/nginx-gen.sh"
         fi

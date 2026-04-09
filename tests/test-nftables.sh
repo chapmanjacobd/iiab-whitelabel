@@ -236,12 +236,26 @@ else
     assert_true "false" "Inet forward chain has accept rules"
 fi
 
-# Test 12: Network interface naming convention
+# Test 12: nftables rules reference correct interface patterns
 echo ""
-echo "Test 12: Network interface naming"
+echo "Test 12: nftables interface patterns in rules"
 
-assert_contains "ve-demo1" "ve-" "Container interface naming convention (veth)"
-assert_contains "vb-unittest" "vb-" "Container interface naming convention (bridge)"
+# Rules are already applied from Test 11; verify the interface patterns
+FORWARD_RULES=$(nft list chain inet iiab forward 2>/dev/null || echo "")
+BRIDGE_RULES=$(nft list chain bridge iiab forward 2>/dev/null || echo "")
+
+# Verify container interface patterns (ve-*, vb-*) appear in rules
+if echo "$FORWARD_RULES" | grep -qE 'iifname.*ve-\*'; then
+    assert_true "true" "Forward rules reference ve-* input interfaces"
+else
+    assert_true "false" "Forward rules reference ve-* input interfaces"
+fi
+
+if echo "$BRIDGE_RULES" | grep -qE 'oifname.*ve-\*.*drop'; then
+    assert_true "true" "Bridge rules drop traffic between ve-* interfaces"
+else
+    assert_true "false" "Bridge rules drop traffic between ve-* interfaces"
+fi
 
 ###############################################################################
 # Summary
