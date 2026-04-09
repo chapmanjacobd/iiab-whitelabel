@@ -109,19 +109,20 @@ jobs:
             echo "=== Diagnostic: Container service state ==="
             sudo systemctl show "systemd-nspawn@unittest.service" --property=ActiveState,SubState,ExecMainStatus 2>&1 || true
             echo "=== Diagnostic: Container network namespace ==="
-            CONTAINER_PID=$(sudo systemctl show "systemd-nspawn@unittest.service" --property=MainPID --value 2>/dev/null)
-            if [ -n "$CONTAINER_PID" ] && [ "$CONTAINER_PID" != "0" ]; then
-              echo "Container PID: $CONTAINER_PID"
-              sudo nsenter -t "$CONTAINER_PID" -n ip addr 2>&1 || true
-              sudo nsenter -t "$CONTAINER_PID" -n ip route 2>&1 || true
-              sudo nsenter -t "$CONTAINER_PID" -n cat /etc/resolv.conf 2>&1 || true
-              echo "--- Container local nginx response ---"
-              sudo nsenter -t "$CONTAINER_PID" -n curl -sS -D- --max-time 5 http://127.0.0.1/ 2>&1 | head -30 || echo "curl not available in container"
-              echo "--- Follow redirect ---"
-              sudo nsenter -t "$CONTAINER_PID" -n curl -sS -D- -L --max-time 10 http://127.0.0.1/ 2>&1 | head -30 || echo "curl not available in container"
-              echo "--- Container listening on port 80 ---"
-              sudo nsenter -t "$CONTAINER_PID" -n ss -tln 2>&1 | grep :80 || echo "Nothing listening on port 80"
-            fi
+            # Use machinectl/systemd-run to run commands inside the container
+            # MainPID is the systemd-nspawn host process (host netns), not the container's init
+            echo "--- Container interfaces ---"
+            sudo systemd-run --machine=unittest --wait ip addr 2>&1 || echo "Failed to run in container"
+            echo "--- Container routing ---"
+            sudo systemd-run --machine=unittest --wait ip route 2>&1 || true
+            echo "--- Container DNS config ---"
+            sudo systemd-run --machine=unittest --wait cat /etc/resolv.conf 2>&1 || true
+            echo "--- Container local nginx response ---"
+            sudo systemd-run --machine=unittest --wait curl -sS -D- --max-time 5 http://127.0.0.1/ 2>&1 | head -30 || echo "curl failed in container"
+            echo "--- Follow redirect ---"
+            sudo systemd-run --machine=unittest --wait curl -sS -D- -L --max-time 10 http://127.0.0.1/ 2>&1 | head -30 || echo "curl failed in container"
+            echo "--- Container listening on port 80 ---"
+            sudo systemd-run --machine=unittest --wait ss -tln 2>&1 | grep :80 || echo "Nothing listening on port 80"
             echo "=== Diagnostic: Last 30 lines of container journal ==="
             sudo journalctl -u "systemd-nspawn@unittest.service" --no-pager -n 30 2>&1 || true
             exit 1

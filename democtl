@@ -11,7 +11,11 @@ ACTIVE_DIR="$STATE_DIR/active"
 RESOURCE_FILE="$STATE_DIR/resources"
 # Network config is defined in scripts/lib-iiab.sh (IIAB_DEMO_SUBNET, IIAB_SUBNET_BASE, etc.)
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts"
+# Compute SCRIPT_DIR correctly whether executed or sourced.
+# When sourced, BASH_SOURCE[0] is the caller's file, so fall back to ${BASH_SOURCE[-1]}.
+_demctl_source="${BASH_SOURCE[-1]}"
+SCRIPT_DIR="$(cd "$(dirname "$_demctl_source")" && pwd)/scripts"
+unset _demctl_source
 
 # shellcheck source=scripts/lib-iiab.sh disable=SC1091
 source "$SCRIPT_DIR/lib-iiab.sh"
@@ -57,6 +61,29 @@ acquire_lock() {
 
 release_lock() {
     flock -u "$LOCK_FD" 2>/dev/null || true
+}
+
+# Clean up a failed build: remove directory and reclaim the IP slot.
+# MUST be called under lock.
+cleanup_failed_build() {
+    local name="$1"
+    local demo_dir="$ACTIVE_DIR/$name"
+    log_demo "$name" "Cleaning up failed build..."
+    # Kill any lingering build/watchdog processes
+    if [ -f "$demo_dir/build.watchdog" ]; then
+        local wpid
+        wpid=$(cat "$demo_dir/build.watchdog" 2>/dev/null || true)
+        [ -n "$wpid" ] && kill "$wpid" 2>/dev/null || true
+        rm -f "$demo_dir/build.watchdog"
+    fi
+    if [ -f "$demo_dir/build.pid" ]; then
+        local pid
+        pid=$(cat "$demo_dir/build.pid" 2>/dev/null || true)
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+        rm -f "$demo_dir/build.pid"
+    fi
+    rm -rf "$demo_dir"
+    log_demo "$name" "Cleanup complete (directory and IP slot reclaimed)"
 }
 
 ###############################################################################
@@ -466,8 +493,8 @@ build_demo() {
     # shellcheck disable=SC2153  # Variables are set via source from config file
     if ! check_resources "$name" "$IMAGE_SIZE_MB" "${BUILD_ON_DISK:-false}"; then
         log_demo "$name" "Resources no longer available, aborting build"
+        cleanup_failed_build "$name"
         release_lock
-        echo "failed" > "$demo_dir/status"
         return 1
     fi
     release_lock
@@ -550,12 +577,19 @@ cmd_remove() {
 
         echo "Removing demo '$name'..."
 
-        # Stop container
-        if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
-            echo "Warning: Could not stop systemd-nspawn@${name}.service (may not be running, continuing removal)"
-        fi
+        # Stop container if running or starting
+        local remove_status
+        remove_status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+        case "$remove_status" in
+            running|starting)
+                echo "  Stopping running container..."
+                if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
+                    echo "  Warning: Could not stop systemd-nspawn@${name}.service (may not be running, continuing removal)"
+                fi
+                ;;
+        esac
         if ! systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null; then
-            echo "Warning: Could not disable systemd-nspawn@${name}.service (may not be registered, continuing removal)"
+            echo "  Warning: Could not disable systemd-nspawn@${name}.service (may not be registered, continuing removal)"
         fi
 
         # Kill any running build and watchdog
@@ -1059,13 +1093,31 @@ cmd_stop() {
         local status
         status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
 
-        if [ "$status" != "running" ]; then
-            echo "Error: demo '$name' is not running (status: $status)" >&2
-            exit_code=1
-            continue
-        fi
+        case "$status" in
+            running|starting|stopping)
+                ;;
+            stopped)
+                echo "Demo '$name' is already stopped."
+                continue
+                ;;
+            building|pending)
+                echo "Error: demo '$name' is being built (status: $status). Use 'democtl remove $name' to cancel." >&2
+                exit_code=1
+                continue
+                ;;
+            failed)
+                echo "Error: demo '$name' has failed. Use 'democtl remove $name' to clean up." >&2
+                exit_code=1
+                continue
+                ;;
+            *)
+                echo "Error: demo '$name' has unknown status '$status'." >&2
+                exit_code=1
+                continue
+                ;;
+        esac
 
-        echo "Stopping demo '$name'..."
+        echo "Stopping demo '$name' (was: $status)..."
         echo "stopping" > "$demo_dir/status"
         if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
             echo "Warning: Could not stop systemd-nspawn@${name}.service (may not be running)"
