@@ -197,7 +197,7 @@ for i in 2 10 100 200 253; do
     fi
 done
 
-# Test 11: nftables rule patterns — verify table/chain structure via nft list
+# Test 11: nftables rule patterns -- verify table/chain structure via nft list
 echo ""
 echo "Test 11: nftables rule design validation"
 

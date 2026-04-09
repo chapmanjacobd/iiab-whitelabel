@@ -65,8 +65,9 @@ jobs:
         run: |
           sudo ./democtl list
           sudo ./democtl status unittest
-          # Check if the image exists (dereference symlink)
-          sudo ls -lhL /var/lib/machines/unittest.raw
+          # Check if the build subvolume exists (dereference symlink)
+          sudo ls -ld /var/lib/machines/unittest
+          sudo test -d /var/lib/machines/unittest
 
       - name: Verify container responds via HTTP
         run: |

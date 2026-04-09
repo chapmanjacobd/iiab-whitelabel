@@ -29,69 +29,23 @@ DISK_BASE=100     # Extra MB headroom per build (btrfs metadata + buffer)
 LOCK_FILE="$STATE_DIR/.democtl.lock"
 LOCK_FD=200
 
-# Stale PID detection -- verify the PID in the lock file is actually a democtl process
-_try_clean_stale_pid() {
-    if [ -f "$LOCK_FILE.pid" ]; then
-        local stale_pid=""
-        stale_pid=$(cat "$LOCK_FILE.pid" 2>/dev/null || echo "")
-        if [ -n "$stale_pid" ] && [ "$stale_pid" -gt 1 ] 2>/dev/null; then
-            # Check if process exists
-            if ! kill -0 "$stale_pid" 2>/dev/null; then
-                # PID is dead, so the .pid file is stale.
-                # We don't remove the LOCK_FILE itself because flock works on the file,
-                # and deleting it while someone else might actually hold it (if PID was wrong)
-                # would break the lock. We just remove the stale .pid file.
-                rm -f "$LOCK_FILE.pid"
-                return 0
-            fi
-            # Process exists -- verify it's actually a democtl process
-            local cmdline=""
-            cmdline=$(tr '\0' ' ' < "/proc/$stale_pid/cmdline" 2>/dev/null || echo "")
-            if [ -n "$cmdline" ] && ! echo "$cmdline" | grep -q 'democtl'; then
-                # Process exists but is NOT democtl -- likely PID reuse
-                local lock_age
-                lock_age=$(( $(date +%s) - $(stat -c%Y "$LOCK_FILE" 2>/dev/null || date +%s) ))
-                if [ "$lock_age" -gt 300 ]; then
-                    rm -f "$LOCK_FILE.pid"
-                    return 0
-                fi
-            fi
-        fi
-    fi
-    return 1
-}
-
 # Acquire an exclusive lock.
+# flock releases automatically when the process dies -- no PID tracking needed.
 acquire_lock() {
     local timeout="${1:--1}"  # -1 = wait forever, 0 = non-blocking
     eval "exec $LOCK_FD>>$LOCK_FILE"
 
     if [ "$timeout" = "0" ]; then
-        if flock -n "$LOCK_FD"; then
-            : # Lock acquired on first try
-        elif _try_clean_stale_pid && flock -n "$LOCK_FD"; then
-            : # Lock acquired after stale PID cleanup
-        else
+        if ! flock -n "$LOCK_FD"; then
             echo "Error: another democtl operation is in progress (lock held)." >&2
             return 1
         fi
     else
-        # For blocking mode, periodically check for stale PIDs
         if [ "$timeout" = "-1" ]; then
-            local retries=0
-            while ! flock -n "$LOCK_FD" 2>/dev/null; do
-                if _try_clean_stale_pid; then
-                    if flock -n "$LOCK_FD"; then
-                        break
-                    fi
-                fi
-                retries=$((retries + 1))
-                if [ "$retries" -ge 60 ]; then
-                    echo "Error: Could not acquire lock after 5 minutes" >&2
-                    return 1
-                fi
-                sleep 5
-            done
+            if ! flock "$LOCK_FD"; then
+                echo "Error: Could not acquire lock" >&2
+                return 1
+            fi
         else
             if ! flock -w "$timeout" "$LOCK_FD"; then
                 echo "Error: Could not acquire lock after ${timeout}s" >&2
@@ -99,9 +53,6 @@ acquire_lock() {
             fi
         fi
     fi
-
-    # SUCCESS: We hold the lock. Now write our PID.
-    echo $$ > "$LOCK_FILE.pid"
 }
 
 release_lock() {
@@ -115,12 +66,10 @@ release_lock() {
 ensure_state_dirs() {
     mkdir -p "$STATE_DIR" "$ACTIVE_DIR" /var/lib/machines
     if [ ! -f "$RESOURCE_FILE" ]; then
-        local disk_total ram_total
+        local disk_total
         disk_total=$(df -m /var/lib/machines 2>/dev/null | awk 'NR==2 {print $2}' || echo 50000)
-        ram_total=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
         cat > "$RESOURCE_FILE" << EOF
 DISK_TOTAL=${disk_total}
-RAM_TOTAL=${ram_total}
 EOF
     fi
 }
@@ -359,7 +308,7 @@ cmd_build() {
     fi
 
     # Validate local-vars path: only check absolute paths exist early (before acquiring lock).
-    # Relative paths are deferred to build time — they may live inside the IIAB repo.
+    # Relative paths are deferred to build time -- they may live inside the IIAB repo.
     if [ -n "$local_vars" ] && [[ "$local_vars" == /* ]] && [ ! -f "$local_vars" ]; then
         echo "Error: local-vars file not found: $local_vars" >&2
         return 1
@@ -1131,6 +1080,38 @@ cmd_stop() {
 }
 
 ###############################################################################
+# Helper: Wait for container to reach running substate
+###############################################################################
+_wait_for_running() {
+    local name="$1"
+    local poll_max=60
+
+    sleep 3
+    local poll_count=0
+    local container_active=false
+    local non_running_count=0
+    while [ $poll_count -lt $poll_max ]; do
+        local substate=""
+        substate=$(systemctl show "systemd-nspawn@${name}.service" --property=SubState --value 2>/dev/null || echo "")
+        if [ "$substate" = "running" ]; then
+            container_active=true
+            break
+        fi
+        non_running_count=$((non_running_count + 1))
+        if [ "$non_running_count" -ge 3 ] && { [ "$substate" = "auto-restart" ] || [ "$substate" = "failed" ]; }; then
+            break
+        fi
+        poll_count=$((poll_count + 1))
+        sleep 1
+    done
+
+    if ! $container_active; then
+        return 1
+    fi
+    return 0
+}
+
+###############################################################################
 # democtl start
 ###############################################################################
 cmd_start() {
@@ -1174,31 +1155,8 @@ cmd_start() {
             echo "Warning: systemctl enable --now returned non-zero (container may still start, polling for status...)"
         fi
 
-        # Poll for actual container startup (nspawn can fail asynchronously)
-        sleep 3
-        local poll_count=0
-        local poll_max=60
-        local container_active=false
-        local non_running_count=0
-        while [ $poll_count -lt $poll_max ]; do
-            local substate=""
-            substate=$(systemctl show "systemd-nspawn@${name}.service" --property=SubState --value 2>/dev/null || echo "")
-            if [ "$substate" = "running" ]; then
-                container_active=true
-                break
-            fi
-            # Track consecutive non-running states to distinguish crash-looping
-            # from transient failures (e.g., brief failed state before restart)
-            non_running_count=$((non_running_count + 1))
-            if [ "$non_running_count" -ge 3 ] && { [ "$substate" = "auto-restart" ] || [ "$substate" = "failed" ]; }; then
-                break
-            fi
-            poll_count=$((poll_count + 1))
-            sleep 1
-        done
-
-        if ! $container_active; then
-            echo "Error: Container did not become active within ${poll_max}s" >&2
+        if ! _wait_for_running "$name"; then
+            echo "Error: Container did not become active within 60s" >&2
             log_demo "$name" "--- systemd-nspawn@${name}.service state ---"
             systemctl show "systemd-nspawn@${name}.service" --property=ActiveState,SubState,ExecMainStatus 2>&1 || true
             log_demo "$name" "--- journal (last 30 lines) ---"
@@ -1256,31 +1214,8 @@ cmd_restart() {
         echo "stopping" > "$demo_dir/status"
         systemctl restart "systemd-nspawn@${name}.service"
 
-        # Poll for actual container startup (nspawn can fail asynchronously)
-        sleep 3
-        local poll_count=0
-        local poll_max=60
-        local container_active=false
-        local non_running_count=0
-        while [ $poll_count -lt $poll_max ]; do
-            local substate=""
-            substate=$(systemctl show "systemd-nspawn@${name}.service" --property=SubState --value 2>/dev/null || echo "")
-            if [ "$substate" = "running" ]; then
-                container_active=true
-                break
-            fi
-            # Track consecutive non-running states to distinguish crash-looping
-            # from transient failures (e.g., brief failed state before restart)
-            non_running_count=$((non_running_count + 1))
-            if [ "$non_running_count" -ge 3 ] && { [ "$substate" = "auto-restart" ] || [ "$substate" = "failed" ]; }; then
-                break
-            fi
-            poll_count=$((poll_count + 1))
-            sleep 1
-        done
-
-        if ! $container_active; then
-            echo "Error: Container did not become active within ${poll_max}s after restart" >&2
+        if ! _wait_for_running "$name"; then
+            echo "Error: Container did not become active within 60s after restart" >&2
             log_demo "$name" "--- journal (last 30 lines) ---"
             journalctl -u "systemd-nspawn@${name}.service" --no-pager -n 30 2>&1 || true
             echo "failed" > "$demo_dir/status"

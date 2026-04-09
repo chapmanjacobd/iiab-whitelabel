@@ -115,7 +115,6 @@ IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
 VOLATILE="overlay"
-RAM_IMAGE=true
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""

@@ -22,13 +22,11 @@ setup_test_env() {
     export ACTIVE_DIR="$TEST_STATE_DIR/active"
     export RESOURCE_FILE="$TEST_STATE_DIR/resources"
     export LOCK_FILE="$TEST_STATE_DIR/.democtl.lock"
-    export RAM_ALLOCATED=0
     export DISK_ALLOCATED=0
 
     # Initialize resource file
     cat > "$RESOURCE_FILE" << EOF
 DISK_TOTAL=50000
-RAM_TOTAL=16384
 EOF
 }
 
@@ -180,7 +178,6 @@ allocate_and_register_ip() {
     cat > "$ACTIVE_DIR/$name/config" << EOF
 DEMO_NAME="$name"
 IMAGE_SIZE_MB=2000
-RAM_IMAGE=true
 EOF
     echo "$ip"
 }
@@ -223,7 +220,6 @@ for i in $(seq 2 254); do
     cat > "$ACTIVE_DIR/demo-$i/config" << EOF
 DEMO_NAME="demo-$i"
 IMAGE_SIZE_MB=2000
-RAM_IMAGE=true
 EOF
 done
 
@@ -233,40 +229,9 @@ IP_EXHAUSTED=$(next_ip 2>/dev/null && echo 0 || echo 1)
 
 assert_equals "1" "$IP_EXHAUSTED" "IP exhaustion detected correctly"
 
-# Test 6: Resource checking
+# Test 6: Demo name validation
 echo ""
-echo "Test 6: Resource checking (insufficient RAM)"
-setup_test_env
-ensure_state_dirs
-
-# Set low RAM total
-cat > "$RESOURCE_FILE" << EOF
-DISK_TOTAL=50000
-RAM_TOTAL=2048
-EOF
-
-RESOURCE_CHECK=$(check_resources "test-demo" 10000 true 2>/dev/null && echo 0 || echo 1)
-
-assert_equals "1" "$RESOURCE_CHECK" "Insufficient RAM detected correctly"
-
-# Test 7: Resource checking (sufficient RAM)
-echo ""
-echo "Test 7: Resource checking (sufficient RAM)"
-setup_test_env
-ensure_state_dirs
-
-cat > "$RESOURCE_FILE" << EOF
-DISK_TOTAL=50000
-RAM_TOTAL=16384
-EOF
-
-RESOURCE_CHECK_OK=$(check_resources "test-demo" 2000 true && echo 0 || echo 1)
-
-assert_equals "0" "$RESOURCE_CHECK_OK" "Sufficient RAM validated"
-
-# Test 8: Demo name validation
-echo ""
-echo "Test 8: Demo name validation"
+echo "Test 6: Demo name validation"
 setup_test_env
 
 # Valid names
@@ -301,9 +266,9 @@ assert_equals "1" "$INVALID2" "Name with dot rejected"
 assert_equals "1" "$INVALID3" "Name with space rejected"
 assert_equals "1" "$LONG_NAME" "Name > 64 chars rejected"
 
-# Test 9: Concurrent IP allocation under lock
+# Test 7: Concurrent IP allocation under lock
 echo ""
-echo "Test 9: Concurrent IP allocation simulation"
+echo "Test 7: Concurrent IP allocation simulation"
 setup_test_env
 ensure_state_dirs
 
@@ -319,7 +284,6 @@ allocate_ip_with_lock() {
     cat > "$ACTIVE_DIR/$name/config" << EOF
 DEMO_NAME="$name"
 IMAGE_SIZE_MB=2000
-RAM_IMAGE=true
 EOF
     release_lock
     echo "$ip"
@@ -336,9 +300,9 @@ assert_equals "10.0.3.2" "$IP_A" "First concurrent IP allocated"
 assert_equals "10.0.3.3" "$IP_B" "Second concurrent IP allocated"
 assert_equals "10.0.3.4" "$IP_C" "Third concurrent IP allocated"
 
-# Test 10: Lock file cleanup after release
+# Test 8: Lock file cleanup after release
 echo ""
-echo "Test 10: Lock file cleanup after release"
+echo "Test 8: Lock file cleanup after release"
 setup_test_env
 ensure_state_dirs
 
@@ -349,9 +313,9 @@ release_lock
 # The actual lock is the file descriptor, not the file
 assert_file_exists "$LOCK_FILE" "Lock file persists after release (expected)"
 
-# Test 11: Sanitize subdomain function
+# Test 9: Sanitize subdomain function
 echo ""
-echo "Test 11: Subdomain sanitization"
+echo "Test 9: Subdomain sanitization"
 SUBDOMAIN1=$(sanitize_subdomain "MyDemo-Test")
 SUBDOMAIN2=$(sanitize_subdomain "MY.DEMO.TEST")
 SUBDOMAIN3=$(sanitize_subdomain "demo_test-123")
@@ -364,9 +328,9 @@ assert_equals "demotest-123" "$SUBDOMAIN3" "Underscores removed, hyphens preserv
 assert_equals "demo" "$SUBDOMAIN4" "Leading/trailing hyphens removed"
 assert_equals "demo" "$SUBDOMAIN5" "Invalid chars fallback to 'demo'"
 
-# Test 12: ensure_state_dirs idempotency
+# Test 10: ensure_state_dirs idempotency
 echo ""
-echo "Test 12: ensure_state_dirs idempotency"
+echo "Test 10: ensure_state_dirs idempotency"
 setup_test_env
 
 ensure_state_dirs

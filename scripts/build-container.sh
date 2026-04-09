@@ -11,7 +11,7 @@
 # Usage:
 #   build-container.sh --name <name> \
 #     --repo <repo> --branch <branch> --size <MB> \
-#     --volatile <mode> --ip <ip> [--ram-image] [--build-on-disk] \
+#     --volatile <mode> --ip <ip> [--build-on-disk] \
 #     [--local-vars <path>] [--config <path>]
 set -euo pipefail
 
@@ -348,7 +348,6 @@ else
     EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
     if [ -n "$EXT_IF" ]; then
         setup_nftables_nat "$EXT_IF"
-        add_container_isolation
     fi
 
     systemd-firstboot --root="$MOUNT_DIR" --delete-root-password --force

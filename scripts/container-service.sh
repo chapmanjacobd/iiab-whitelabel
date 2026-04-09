@@ -12,7 +12,7 @@
 # Default (from democtl): overlay
 #
 # The container rootfs is a btrfs subvolume at /var/lib/machines/<name>.
-# systemd-nspawn's --volatile= is used directly — it works with directory
+# systemd-nspawn's --volatile= is used directly -- it works with directory
 # rootfs the same way it works with image files.
 set -euo pipefail
 

@@ -6,7 +6,7 @@ This system manages the full lifecycle of IIAB demo instances on a Debian 13 hos
 
 ## Quick Start
 
-```
+```bash
 sudo make install
 ```
 
@@ -16,49 +16,59 @@ The `democtl` tool is the primary interface for managing demos.
 
 ### Core Commands
 
-- `add <name> [flags]` -- Build and start a new demo (runs in background).
-- `remove <name>` -- Stop, delete, and free all resources.
-- `list` / `status <name>` -- Monitor active demos and their build logs.
-- `shell <name>` -- Drop directly into a running container.
-- `rebuild <name>` -- Refresh a demo while preserving its configuration.
-- `reload` -- Manually regenerate Nginx routing from active demos.
+| Command                     | Description                                |
+| --------------------------- | ------------------------------------------ |
+| `build <name> [flags]`      | Build a new demo                           |
+| `remove <name> [name ...]`  | Stop and delete demo(s)                    |
+| `rebuild <name> [name ...]` | Remove and re-build demo(s)                |
+| `list`                      | Show all demos and resource usage          |
+| `status <name>`             | Detailed status for a demo                 |
+| `logs <name>`               | Show build log or container journal        |
+| `shell <name>`              | Open a shell in a running container        |
+| `start <name>`              | Start a stopped demo                       |
+| `stop <name>`               | Stop a running demo                        |
+| `restart <name>`            | Restart a running demo                     |
+| `reload`                    | Regenerate nginx config from active demos  |
+| `settle [timeout]`          | Wait until all demos reach a settled state |
 
-### Important Flags
+### Build Flags
 
-| Flag           | Default                     | Description                           |
-| -------------- | --------------------------- | ------------------------------------- |
-| `--repo`       | `github.com/iiab/iiab.git`  | Source repository for IIAB.           |
-| `--branch`     | `master`                    | Git ref (branch, tag, or PR head).    |
-| `--local-vars` | `vars/local_vars_small.yml` | Path to IIAB configuration variables. |
-| `--size`       | 15000                       | Virtual disk size in MB.              |
+| Flag           | Default                     | Description                               |
+| -------------- | --------------------------- | ----------------------------------------- |
+| `--repo`       | `github.com/iiab/iiab.git`  | Source repository for IIAB.               |
+| `--branch`     | `master`                    | Git ref (branch, tag, or PR head).        |
+| `--local-vars` | `vars/local_vars_small.yml` | Path to IIAB configuration variables.     |
+| `--size`       | 15000                       | Virtual disk size in MB.                  |
+| `--start`      | _(off)_                     | Start the demo after build completes      |
+| `--fg`         | _(off)_                     | Build in foreground instead of background |
 
 ## Technical Architecture
 
-### Storage & Persistence
+### Storage
 
-There are three independent layers of storage handling:
+All builds use a single **btrfs file** with copy-on-write (CoW) snapshots:
 
-1. Building Storage: Where the image is built.
-    - Default (RAM): Builds occur in `/run/iiab-ramfs/` (tmpfs) for maximum speed.
-    - Disk Override: Use `--build-on-disk` if host RAM is constrained.
+| Location                        | File         | Use                                    |
+| ------------------------------- | ------------ | -------------------------------------- |
+| `/run/iiab-demos/storage.btrfs` | tmpfs-backed | Default: fast builds in RAM            |
+| `/var/iiab-demos/storage.btrfs` | disk-backed  | Use `--build-on-disk` for large builds |
 
-2. Runtime Storage: Where the final image lives.
-    - Default (RAM): The final `.raw` image is kept in RAM. Zero disk I/O during execution.
-    - Disk Override: Use `--disk-backed` to move the final image to `/var/lib/machines/`.
+The Debian base is stored once as a read-only subvolume. Each build is a CoW snapshot -- instant and sharing all unmodified blocks with the base. Final builds are read-only subvolumes symlinked from `/var/lib/machines/<name>` for systemd-nspawn discovery.
 
-3. Runtime Persistence: How changes inside the container are handled.
+### Runtime Persistence
 
-| --volatile= Mode    | Rootfs        | temporary         | persistent |
-| ------------------- | ------------- | ----------------- | ---------- |
-| `no`                | direct        | none              | /          |
-| `state`             | partial tmpfs | /etc, /usr        | /var       |
-| `overlay` (Default) | overlayfs     | / (overlay lower) | none       |
-| `yes`               | tmpfs         | /                 | none       |
+| `--volatile=` Mode  | Rootfs        | Temporary           | Persistent |
+| ------------------- | ------------- | ------------------- | ---------- |
+| `no`                | direct        | none                | `/`        |
+| `state`             | partial tmpfs | `/etc`, `/usr`      | `/var`     |
+| `overlay` (default) | overlayfs     | `/` (overlay lower) | none       |
+| `yes`               | tmpfs         | `/`                 | none       |
 
 ### Network & Routing
 
-- Internal: Containers receive unique IPs from an internal pool (`10.0.3.x`).
-- External: `scripts/nginx-gen.sh` dynamically maps subdomains to container IPs and manages ACME challenge paths for Certbot.
+- Internal: Containers receive unique IPs from `10.0.3.x`
+- External: `nginx-gen.sh` dynamically maps subdomains to container IPs
+- Isolation: nftables rules block container-to-container traffic while allowing internet access
 
 ## Development & Troubleshooting
 
@@ -67,32 +77,19 @@ There are three independent layers of storage handling:
 Test any IIAB PR by pointing `democtl` to the specific git ref:
 
 ```bash
-democtl add pr123 --branch refs/pull/123/head --description "Testing PR #123"
+democtl build pr123 --branch refs/pull/123/head --description "Testing PR #123"
 ```
 
-Then go to https://**pr123**.iiab.io/home/
-
-### Resource Management
-
-`democtl` tracks RAM and disk allocation. Use `democtl list` to see current usage. If a build fails due to memory constraints, use `democtl ramfs cleanup` to clear stale images from tmpfs.
+Then visit https://**pr123**.iiab.io/home/
 
 ### Logs
 
-- Build: `/var/lib/iiab-demos/active/<name>/build.log` (or `democtl logs <name>`).
-- Runtime: `journalctl -u systemd-nspawn@<name>.service`.
-
-### Not enough RAM
-
-```bash
-democtl list              # See allocations
-democtl remove <name>     # Free resources
-democtl ramfs status      # Check tmpfs usage
-democtl ramfs cleanup     # Free all RAM
-```
+- Build: `democtl logs <name>` or `/var/lib/iiab-demos/active/<name>/build.log`
+- Runtime: `journalctl -u systemd-nspawn@<name>.service`
 
 ### nginx returns 502
 
 ```bash
-democtl list              # Verify container is running
-democtl shell <name>      # Check inside container
+sudo democtl list              # Verify container is running
+sudo democtl shell <name>      # Check inside container
 ```

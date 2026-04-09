@@ -92,5 +92,4 @@ clean:
 	bash democtl remove small 2>/dev/null || true
 	bash democtl remove medium 2>/dev/null || true
 	bash democtl remove large 2>/dev/null || true
-	bash democtl ramfs cleanup 2>/dev/null || true
 	@echo "All demos removed."

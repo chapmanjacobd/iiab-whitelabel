@@ -60,7 +60,7 @@ fi
 
 if [ ${#DOMAINS[@]} -eq 0 ]; then
     echo "Warning: No active demos found. Add demos first, then run this script." >&2
-    echo "  democtl add small"
+    echo "  democtl build small"
     exit 0
 fi
 
