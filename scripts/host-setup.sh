@@ -148,7 +148,7 @@ else
 fi
 
 ###############################################################################
-# 6. Clear existing firewall rules and configure nftables (idempotent)
+# 6. Configure nftables for container NAT and isolation (idempotent)
 ###############################################################################
 echo ""
 echo "=== Configuring nftables for container NAT ==="
@@ -157,45 +157,35 @@ EXT_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
 if [ -z "$EXT_IF" ]; then
     echo "Warning: Could not detect external interface, skipping networking" >&2
 else
-    # Flush ALL existing firewall rules (iptables, ip6tables, nftables)
-    # This removes Docker's default iptables rules (FORWARD policy DROP) and
-    # any stale configuration. Our containers need FORWARD access for internet.
-    echo "Flushing all existing firewall rules..."
+    # Flush only IIAB-managed nftables tables (avoid destroying other firewall configs)
+    echo "Flushing IIAB nftables tables..."
+    nft delete table inet iiab 2>/dev/null || true
+    nft delete table bridge iiab 2>/dev/null || true
 
-    # Flush iptables (all tables)
+    # Flush Docker's iptables FORWARD DROP policy so our containers can reach the internet
     if command -v iptables >/dev/null 2>&1; then
-        iptables -F 2>/dev/null || true
-        iptables -X 2>/dev/null || true
-        iptables -t nat -F 2>/dev/null || true
-        iptables -t nat -X 2>/dev/null || true
-        iptables -t mangle -F 2>/dev/null || true
-        iptables -t mangle -X 2>/dev/null || true
-        iptables -P INPUT ACCEPT 2>/dev/null || true
+        echo "Resetting iptables FORWARD policy to ACCEPT..."
         iptables -P FORWARD ACCEPT 2>/dev/null || true
-        iptables -P OUTPUT ACCEPT 2>/dev/null || true
     fi
 
-    # Flush ip6tables
-    if command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -F 2>/dev/null || true
-        ip6tables -X 2>/dev/null || true
-        ip6tables -P INPUT ACCEPT 2>/dev/null || true
-        ip6tables -P FORWARD ACCEPT 2>/dev/null || true
-        ip6tables -P OUTPUT ACCEPT 2>/dev/null || true
+    echo "Firewall state cleared"
+
+    if ! setup_nftables_nat "$EXT_IF"; then
+        echo "ERROR: NAT setup failed, restoring safe FORWARD policy" >&2
+        iptables -P FORWARD DROP 2>/dev/null || true
+        exit 1
     fi
 
-    # Flush nftables completely
-    nft flush ruleset 2>/dev/null || true
-
-    echo "All firewall rules cleared"
-
-    setup_nftables_nat "$EXT_IF"
-    add_container_isolation
+    if ! add_container_isolation; then
+        echo "ERROR: Isolation rules setup failed, restoring safe FORWARD policy" >&2
+        iptables -P FORWARD DROP 2>/dev/null || true
+        exit 1
+    fi
 fi
 
 # Make nftables persistent
 mkdir -p /etc/nftables
-nft list ruleset > /etc/nftables.conf
+nft list ruleset > /etc/nftables.conf.tmp && mv /etc/nftables.conf.tmp /etc/nftables.conf
 echo "nftables rules saved to /etc/nftables.conf"
 
 ###############################################################################
