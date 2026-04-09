@@ -2,6 +2,7 @@
 # build-container.sh - Build an IIAB container image with arbitrary config
 #
 # All builds happen in RAM by default (tmpfs), producing zero disk I/O.
+# Uses btrfs CoW snapshots to share a common Debian base across builds.
 # After shrinking, the image is either kept in RAM (--ram-image) or
 # copied to persistent disk. Use --build-on-disk to override.
 #
@@ -9,7 +10,7 @@
 #   build-container.sh --name <name> \
 #     --repo <repo> --branch <branch> --size <MB> \
 #     --volatile <mode> --ip <ip> [--ram-image] [--build-on-disk] \
-#     [--local-vars <path>] [--image-source <path>]
+#     [--local-vars <path>] [--config <path>]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +26,6 @@ VOLATILE="overlay"
 IP=""
 RAM_IMAGE=false
 LOCAL_VARS=""
-IMAGE_SOURCE=""
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 CONFIG_PATH=""
@@ -41,7 +41,6 @@ while [[ $# -gt 0 ]]; do
         --ip)         IP="$2"; shift 2 ;;
         --ram-image)  RAM_IMAGE=true; shift ;;
         --local-vars) LOCAL_VARS="$2"; shift 2 ;;
-        --image-source) IMAGE_SOURCE="$2"; shift 2 ;;
         --build-on-disk) BUILD_ON_DISK=true; shift ;;
         --skip-install) SKIP_INSTALL=true; shift ;;
         --config)     CONFIG_PATH="$2"; shift 2 ;;
@@ -80,22 +79,63 @@ echo "Build on disk: $BUILD_ON_DISK"
 echo "Local vars:   ${LOCAL_VARS:-(none)}"
 
 ###############################################################################
-# Resolve base image source
+# Shared btrfs base image
 ###############################################################################
-BASE_IMAGE=""
-if [ -n "$IMAGE_SOURCE" ] && [ -f "$IMAGE_SOURCE" ]; then
-    BASE_IMAGE="$IMAGE_SOURCE"
-elif [ -f "/run/iiab-ramfs/base-image.raw" ]; then
-    BASE_IMAGE="/run/iiab-ramfs/base-image.raw"
-elif [ -f "/var/lib/iiab-demos/debian-13-generic-amd64.raw" ]; then
-    BASE_IMAGE="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
-else
-    echo "Downloading Debian 13 generic amd64 image..."
-    mkdir -p /var/lib/iiab-demos
-    curl -fL -o /var/lib/iiab-demos/debian-13-generic-amd64.raw \
-        "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw"
-    BASE_IMAGE="/var/lib/iiab-demos/debian-13-generic-amd64.raw"
-fi
+BASE_DIR="/var/lib/iiab-demos"
+BASE_BTRFS="$BASE_DIR/base-debian.btrfs"
+BASE_MOUNT="$BASE_DIR/base-debian"
+
+# Prepare the shared Debian base btrfs image (runs once, then reused)
+prepare_base_image() {
+    if [ -f "$BASE_BTRFS" ]; then
+        echo "Base image already exists: $BASE_BTRFS"
+        return 0
+    fi
+
+    mkdir -p "$BASE_DIR"
+
+    # Download Debian cloud image
+    local raw_file="$BASE_DIR/debian-13-generic-amd64.raw"
+    if [ ! -f "$raw_file" ]; then
+        echo "Downloading Debian 13 generic amd64 image..."
+        curl -fL -o "$raw_file" \
+            "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.raw"
+    fi
+
+    # Create backing file for the btrfs base
+    echo "Creating base btrfs image: $BASE_BTRFS (5GB)..."
+    fallocate -l 5G "$BASE_BTRFS"
+    # Prevent nested CoW if host filesystem is btrfs
+    chattr +C "$BASE_BTRFS" 2>/dev/null || true
+
+    mkfs.btrfs -f -L debian-base "$BASE_BTRFS" >/dev/null 2>&1
+    mkdir -p "$BASE_MOUNT"
+    mount -o loop "$BASE_BTRFS" "$BASE_MOUNT"
+
+    # Extract rootfs from Debian .raw into btrfs using systemd-dissect
+    local extract_dir
+    extract_dir=$(mktemp -d /tmp/debian-extract.XXXXXX)
+    echo "Extracting Debian rootfs from .raw image..."
+    systemd-dissect -M "$raw_file" "$extract_dir" 2>/dev/null || {
+        echo "Error: systemd-dissect failed to mount $raw_file" >&2
+        umount "$BASE_MOUNT" 2>/dev/null || true
+        rm -rf "$BASE_MOUNT" "$BASE_BTRFS" "$extract_dir"
+        exit 1
+    }
+
+    echo "Copying rootfs into btrfs image..."
+    cp -a "$extract_dir/"* "$BASE_MOUNT/" 2>/dev/null || true
+    cp -a "$extract_dir/."[^.]* "$BASE_MOUNT/" 2>/dev/null || true
+
+    # Clean up
+    umount "$extract_dir" 2>/dev/null || true
+    rm -rf "$extract_dir"
+
+    # Clean up extracted image metadata
+    rm -f "$BASE_MOUNT"/etc/machine-id "$BASE_MOUNT"/etc/hostname
+
+    echo "Base image ready: $BASE_BTRFS ($(du -sh "$BASE_MOUNT" | cut -f1))"
+}
 
 ###############################################################################
 # Build working directory (tmpfs by default)
@@ -106,7 +146,8 @@ else
     BUILD_DIR="/run/iiab-demos/build/${NAME}"
 fi
 MOUNT_DIR="${BUILD_DIR}/rootfs"
-WORK_IMG="${BUILD_DIR}/work.img"
+# WORK_BTRFS is the btrfs image file for this build
+WORK_BTRFS="${BUILD_DIR}/work.btrfs"
 
 if ! $BUILD_ON_DISK && ! mountpoint -q "${BUILD_DIR%/*}" 2>/dev/null; then
     mkdir -p "${BUILD_DIR%/*}"
@@ -125,78 +166,55 @@ fi
 LOOPDEV=""
 cleanup() {
     if mountpoint -q "$MOUNT_DIR" 2>/dev/null; then
-        echo "Warning: Mount still active at $MOUNT_DIR -- cleaning up" >&2
         umount -l "$MOUNT_DIR" 2>/dev/null || true
     fi
     if [ -n "$LOOPDEV" ] && losetup "$LOOPDEV" &>/dev/null; then
-        echo "Warning: Loop device $LOOPDEV still attached -- detaching" >&2
         losetup --detach "$LOOPDEV" 2>/dev/null || true
     fi
     # For non-RAM builds from RAM, clean up only our own build tmpfs
     if $TMPFS_MOUNTED && ! $RAM_IMAGE && mountpoint -q "$BUILD_DIR" 2>/dev/null; then
-        echo "Cleaning up build tmpfs for $NAME..."
         umount "$BUILD_DIR" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
 
 ###############################################################################
-# Step 1: Prepare Debian base image
+# Step 1: Snapshot Debian base into independent btrfs image
 ###############################################################################
 echo ""
-echo "=== Step 1: Preparing Debian base image ==="
+echo "=== Step 1: Preparing Debian base from shared btrfs image ==="
 
-# Copy base image to working file (never modify the source in-place)
-echo "Copying base image to working file..."
-cp --reflink=auto "$BASE_IMAGE" "$WORK_IMG"
+prepare_base_image
 
-# Grow image to target size
-CURRENT_BYTES=$(stat -c %s "$WORK_IMG")
-CURRENT_MB=$(( CURRENT_BYTES / 1024 / 1024 ))
-ADDITIONAL_MB=$(( SIZE_MB - CURRENT_MB ))
-if [ "$ADDITIONAL_MB" -gt 0 ]; then
-    echo "Growing image from ${CURRENT_MB}MB to ${SIZE_MB}MB..."
-    truncate -s "${SIZE_MB}M" "$WORK_IMG"
+# Mount the base btrfs if not already mounted
+if ! mountpoint -q "$BASE_MOUNT" 2>/dev/null; then
+    mkdir -p "$BASE_MOUNT"
+    mount -o loop "$BASE_BTRFS" "$BASE_MOUNT"
 fi
 
-# Create loop device with partition scanning
-LOOPDEV=$(losetup --find "$WORK_IMG" --nooverlap --show --partscan)
-echo "Loop device: $LOOPDEV"
+# Create an independent btrfs file for this build (starts small, grows on demand)
+# The backing file is sparse -- actual space used matches written data
+echo "Creating build btrfs image: $WORK_BTRFS (${SIZE_MB}MB capacity)..."
+fallocate -l 0 "$WORK_BTRFS"
+truncate -s "${SIZE_MB}M" "$WORK_BTRFS"
+mkfs.btrfs -f -L "$NAME" "$WORK_BTRFS" >/dev/null 2>&1
 
-# Fix GPT backup header (Debian images are GPT)
-if command -v sgdisk &>/dev/null; then
-    sgdisk -e "$LOOPDEV" 2>/dev/null || true
-fi
+# Mount the build image
+mkdir -p "$MOUNT_DIR"
+mount -o loop "$WORK_BTRFS" "$MOUNT_DIR"
 
-# Wait for partition device
-for _ in $(seq 1 30); do
-    [ -b "${LOOPDEV}p1" ] && break
-    sleep 1
-done
-if [ ! -b "${LOOPDEV}p1" ]; then
-    echo "Error: Partition ${LOOPDEV}p1 not found after 30s" >&2
-    exit 1
-fi
+# Receive the base into our build image via btrfs send (creates independent copy)
+# The base data is transferred efficiently; the build image is now standalone
+echo "Receiving base snapshot into build image..."
+btrfs subvolume snapshot -r "$BASE_MOUNT" "$BASE_MOUNT/.iiab-send-snap" >/dev/null
+btrfs send "$BASE_MOUNT/.iiab-send-snap" | btrfs receive -d "$MOUNT_DIR" rootfs >/dev/null 2>&1
+btrfs subvolume delete "$BASE_MOUNT/.iiab-send-snap" >/dev/null 2>&1 || true
 
-# Resize partition to fill the image
-echo "Resizing partition to fill available space..."
-parted --script "$LOOPDEV" resizepart 1 100%
-sync
-partprobe "$LOOPDEV" 2>/dev/null || true
-udevadm settle 2>/dev/null || sleep 2
+# Remount so $MOUNT_DIR is the rootfs directly (no subvolume path needed in Steps 2-3)
+umount "$MOUNT_DIR"
+mount -o loop,subvol=rootfs "$WORK_BTRFS" "$MOUNT_DIR"
 
-# Resize filesystem
-PARTDEV="${LOOPDEV}p1"
-echo "Checking and resizing filesystem..."
-e2fsck -p -f "$PARTDEV"
-resize2fs "$PARTDEV"
-e2fsck -p -f "$PARTDEV"
-
-# Mount
-echo "Mounting root filesystem at $MOUNT_DIR..."
-mount "$PARTDEV" "$MOUNT_DIR"
-
-echo "Base image ready at $MOUNT_DIR ($(du -sh "$MOUNT_DIR" | cut -f1))"
+echo "Base image snapshot ready at $MOUNT_DIR ($(du -sh "$MOUNT_DIR" | cut -f1))"
 
 ###############################################################################
 # Step 2: Prepare the container rootfs
@@ -419,10 +437,10 @@ EXPECT_EOF
 fi
 
 ###############################################################################
-# Step 4: Shrink the image
+# Step 4: Shrink the btrfs image
 ###############################################################################
 echo ""
-echo "=== Step 4: Shrinking image ==="
+echo "=== Step 4: Shrinking btrfs image ==="
 
 # Add metadata before cleanup
 {
@@ -436,8 +454,6 @@ echo "=== Step 4: Shrinking image ==="
 echo uninitialized > "$MOUNT_DIR/etc/machine-id"
 rm -f "$MOUNT_DIR/etc/iiab/uuid"
 rm -f "$MOUNT_DIR/var/swap"
-touch "$MOUNT_DIR/.resize-rootfs"
-
 
 # Clean rootfs via nspawn
 systemd-nspawn -q -D "$MOUNT_DIR" --pipe /bin/bash -eux << 'CLEANEOF'
@@ -456,105 +472,60 @@ CLEANEOF
 
 systemd-firstboot --root="$MOUNT_DIR" --timezone=UTC --force
 
-# Zero-fill free space for better compression
+# Zero-fill free space so btrfs balance can reclaim it
 echo "Zero-filling unused blocks..."
 (sh -c "cat /dev/zero > '$MOUNT_DIR/zero.fill'" 2>/dev/null || true)
 sync
 rm -f "$MOUNT_DIR/zero.fill"
 
-# Unmount
+# Unmount before shrinking
 echo "Unmounting..."
 umount "$MOUNT_DIR"
 rmdir "$MOUNT_DIR"
 sync
 
-# Shrink filesystem
-echo "Shrinking filesystem to minimal size..."
-e2fsck -p -f "$PARTDEV"
-resize2fs -M "$PARTDEV"
+# Re-mount to run btrfs operations
+mkdir -p "$MOUNT_DIR"
+mount -o loop "$WORK_BTRFS" "$MOUNT_DIR"
 
-# Calculate minimal partition size from filesystem metadata
-ROOTFS_BLOCKSIZE=$(tune2fs -l "$PARTDEV" | grep "^Block size" | awk '{print $NF}')
-ROOTFS_BLOCKCOUNT=$(tune2fs -l "$PARTDEV" | grep "^Block count" | awk '{print $NF}')
-ROOTFS_PARTSIZE=$((ROOTFS_BLOCKCOUNT * ROOTFS_BLOCKSIZE))
-# 50MB buffer covers ext4 journal (~128MB reserved, typically <32MB active) + alignment slack.
-# resize2fs -M already produces the exact minimum, so this is pure safety margin.
-BUFFER_SIZE_MB=50
-BUFFER_SIZE=$((BUFFER_SIZE_MB * 1024 * 1024))
-TARGET_PARTITION_SIZE=$((ROOTFS_PARTSIZE + BUFFER_SIZE))
+# Balance to compact all data to the beginning of the filesystem
+echo "Balancing btrfs to compact data..."
+btrfs balance start -m -d -v "$MOUNT_DIR" 2>&1 | tail -1
 
-# Align to 1 MiB boundary for safety
+# Get actual used space and calculate target size
+USED_KB=$(btrfs filesystem usage --raw "$MOUNT_DIR" 2>/dev/null | \
+    awk '/Device size:/ {print $NF}' || \
+    btrfs filesystem df "$MOUNT_DIR" 2>/dev/null | awk '/Data/ {used+=$4} END {print used*1024}')
+# Fallback: just use du
+if [ -z "$USED_KB" ] || [ "$USED_KB" = "0" ]; then
+    USED_KB=$(du -sk "$MOUNT_DIR" | cut -f1)
+fi
+
+# Add 100MB buffer for btrfs metadata and safety
+BUFFER_KB=$((100 * 1024))
+TARGET_KB=$((USED_KB + BUFFER_KB))
+# Round up to nearest MiB
+TARGET_MB=$(( (TARGET_KB + 1023) / 1024 ))
+
+echo "Used: $(( USED_KB / 1024 ))MB, target: ${TARGET_MB}MB"
+
+# Shrink the filesystem
+btrfs filesystem resize "${TARGET_MB}M" "$MOUNT_DIR" >/dev/null 2>&1 || true
+
+# Unmount and truncate the backing file
+umount "$MOUNT_DIR"
+rmdir "$MOUNT_DIR"
+
+# Add small safety margin and align to 1 MiB
+NEW_SIZE=$(( (TARGET_MB + 10) * 1024 * 1024 ))
 ALIGN=$((1024 * 1024))
-TARGET_PARTITION_SIZE=$(( ((TARGET_PARTITION_SIZE + ALIGN - 1) / ALIGN) * ALIGN ))
-
-# Get device sector size
-SECTOR_SIZE=$(blockdev --getss "$LOOPDEV" 2>/dev/null || echo 512)
-echo "Sector size: $SECTOR_SIZE"
-
-echo "Filesystem: $(( ROOTFS_PARTSIZE / 1024 / 1024 ))MB, target partition: $(( TARGET_PARTITION_SIZE / 1024 / 1024 ))MB"
-
-# Detach loop device -- we'll work on the image file directly from here
-losetup --detach "$LOOPDEV"
-LOOPDEV=""
-
-# Recreate partition 1 at exact target size using sgdisk on the image file
-# (avoids kernel loop-device caching and GPT size-mismatch issues)
-SGDISK_INFO=$(sgdisk -i 1 "$WORK_IMG" 2>/dev/null || true)
-PART_START_SECTOR=$(echo "$SGDISK_INFO" | awk '/^First sector:/ {print $3}')
-# GUID is field 4: "Partition GUID code: UUID (description)"
-PART_TYPE_CODE=$(echo "$SGDISK_INFO" | awk '/^Partition GUID code:/ {print $4}')
-
-TARGET_SECTORS=$((TARGET_PARTITION_SIZE / SECTOR_SIZE))
-PART_END_SECTOR=$((PART_START_SECTOR + TARGET_SECTORS - 1))
-
-echo "Recreating partition 1 on image: sector ${PART_START_SECTOR} to ${PART_END_SECTOR}"
-
-# Delete and recreate with exact bounds directly on the image file
-sgdisk -d 1 "$WORK_IMG" >/dev/null 2>&1
-sgdisk -n "1:${PART_START_SECTOR}:${PART_END_SECTOR}" \
-    -t "1:${PART_TYPE_CODE:-1}" \
-    "$WORK_IMG" >/dev/null 2>&1
-
-# Truncate image: partition end + 1 sector + GPT backup (~34 sectors), aligned
-GPT_BACKUP_SECTORS=34
-TRUNCATE_SECTORS=$((PART_END_SECTOR + 1 + GPT_BACKUP_SECTORS))
-NEW_SIZE=$((TRUNCATE_SECTORS * SECTOR_SIZE))
-# Align to 1 MiB boundary
 NEW_SIZE=$(( ((NEW_SIZE + ALIGN - 1) / ALIGN) * ALIGN ))
 
 echo "Truncating image to $(( NEW_SIZE / 1024 / 1024 ))MB..."
-truncate -s "$NEW_SIZE" "$WORK_IMG"
-
-# Fix GPT backup header for the new (smaller) disk size
-sgdisk -e "$WORK_IMG" >/dev/null 2>&1
-
-# Reattach loop device with partition scanning so we can expand the filesystem
-LOOPDEV=$(losetup --find "$WORK_IMG" --nooverlap --show --partscan)
-PARTDEV="${LOOPDEV}p1"
-for _ in $(seq 1 30); do
-    [ -b "${LOOPDEV}p1" ] && break
-    sleep 1
-done
-if [ ! -b "${LOOPDEV}p1" ]; then
-    echo "Error: Partition ${LOOPDEV}p1 not found after reattach" >&2
-    exit 1
-fi
-
-# Expand filesystem to fill the (now smaller) partition
-echo "Expanding filesystem to fill resized partition..."
-e2fsck -p -f "$PARTDEV" || true
-if ! resize2fs "$PARTDEV" 2>&1; then
-    echo "Error: resize2fs failed, filesystem does not match partition size" >&2
-    exit 1
-fi
-tune2fs -m 1 "$PARTDEV" >/dev/null 2>&1
-
-# Final detach
-losetup --detach "$LOOPDEV"
-LOOPDEV=""
+truncate -s "$NEW_SIZE" "$WORK_BTRFS"
 
 # Update config with actual image size (the --size value was a max, not the real usage)
-ACTUAL_SIZE_MB=$(( ($(stat -c %s "$WORK_IMG") + 1048575) / 1048576 ))  # round up to MB
+ACTUAL_SIZE_MB=$(( NEW_SIZE / 1024 / 1024 ))
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
     sed -i "s/^IMAGE_SIZE_MB=.*/IMAGE_SIZE_MB=$ACTUAL_SIZE_MB/" "$CONFIG_PATH"
     echo "Updated config IMAGE_SIZE_MB: $SIZE_MB -> $ACTUAL_SIZE_MB"
@@ -583,9 +554,9 @@ if $RAM_IMAGE; then
 
     # Move from build location to RAM image store
     DEST="/run/iiab-ramfs/${NAME}.raw"
-    mv "$WORK_IMG" "$DEST"
+    mv "$WORK_BTRFS" "$DEST"
 
-    # Symlink so systemd-nspawn can find it
+    # Symlink so systemd-nspawn can find it (systemd-dissect auto-detects btrfs)
     ln -sf "$DEST" "/var/lib/machines/${NAME}.raw"
     echo ""
     echo "=========================================="
@@ -595,7 +566,7 @@ if $RAM_IMAGE; then
 else
     # Copy final image to persistent disk
     DEST="/var/lib/machines/${NAME}.raw"
-    cp --reflink=auto "$WORK_IMG" "$DEST"
+    cp --reflink=auto "$WORK_BTRFS" "$DEST"
     echo ""
     echo "=========================================="
     echo "Build complete!"
