@@ -236,6 +236,22 @@ check_resources() {
         storage_avail=$(( avail_ram - already_allocated ))
     fi
 
+    # If storage is mounted, use btrfs filesystem df for more accurate accounting
+    local storage_mount=""
+    if [ -f /run/iiab-demos/storage.btrfs ] && mountpoint -q /run/iiab-demos/storage 2>/dev/null; then
+        storage_mount="/run/iiab-demos/storage"
+    elif [ -f /var/iiab-demos/storage.btrfs ] && mountpoint -q /var/iiab-demos/storage 2>/dev/null; then
+        storage_mount="/var/iiab-demos/storage"
+    fi
+    if [ -n "$storage_mount" ]; then
+        local btrfs_free
+        btrfs_free=$(btrfs filesystem df "$storage_mount" 2>/dev/null | \
+            awk '/Data, single/ {match($0, /free=([0-9.]+)([A-Za-z]+)/, a); if (a[2]=="GiB") printf "%d", a[1]*1024; else if (a[2]=="MiB") printf "%d", a[1]; else print 0}' || echo 0)
+        if [ "$btrfs_free" -gt 0 ] && [ "$btrfs_free" -lt "$storage_avail" ]; then
+            storage_avail=$btrfs_free
+        fi
+    fi
+
     local needed=$(( size_mb + DISK_BASE ))
     if [ "$needed" -gt "$storage_avail" ]; then
         echo "Error: Insufficient space to build demo '$name'." >&2
@@ -656,14 +672,121 @@ cmd_remove() {
 ###############################################################################
 cmd_rebuild() {
     ensure_root "$@"
-    if [ $# -eq 0 ]; then
-        echo "Error: at least one demo name required" >&2
+
+    local rebuild_all=false
+    local names=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all) rebuild_all=true; shift ;;
+            *) names+=("$1"); shift ;;
+        esac
+    done
+
+    if $rebuild_all; then
+        # Rebuild everything from scratch: tear down all demos, recreate storage
+        echo "=== Rebuilding all demos from scratch ==="
+        echo "This will: stop all demos, delete storage.btrfs, redownload Debian base"
+        echo ""
+
+        # Collect all demo names
+        for demo_dir in "$ACTIVE_DIR"/*/; do
+            [ -d "$demo_dir" ] || continue
+            names+=("$(basename "$demo_dir")")
+        done
+
+        if [ ${#names[@]} -eq 0 ]; then
+            echo "No demos to rebuild."
+            return 0
+        fi
+
+        echo "Demos to rebuild: ${names[*]}"
+        echo ""
+
+        # Stop all running containers
+        echo "=== Stopping all containers ==="
+        for name in "${names[@]}"; do
+            local demo_dir="$ACTIVE_DIR/$name"
+            local status
+            status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+            if [ "$status" = "running" ] || [ "$status" = "starting" ]; then
+                echo "  Stopping $name..."
+                systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null || true
+            fi
+        done
+
+        # Disable all services
+        for name in "${names[@]}"; do
+            systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null || true
+        done
+
+        # Unmount storage and delete btrfs file
+        echo ""
+        echo "=== Tearing down storage ==="
+        for storage_mount in /run/iiab-demos/storage /var/iiab-demos/storage; do
+            if mountpoint -q "$storage_mount" 2>/dev/null; then
+                echo "  Unmounting $storage_mount..."
+                umount -l "$storage_mount" 2>/dev/null || true
+            fi
+        done
+        rm -f /run/iiab-demos/storage.btrfs /var/iiab-demos/storage.btrfs
+        rm -rf /run/iiab-demos/storage /var/iiab-demos/storage
+        echo "  Storage deleted."
+
+        # Remove all demo state
+        echo ""
+        echo "=== Removing all demo state ==="
+        for name in "${names[@]}"; do
+            if [ -z "$name" ]; then
+                echo "  Warning: empty demo name, skipping"
+                continue
+            fi
+            echo "  Removing $name..."
+            rm -f "/var/lib/machines/${name:?}"
+            rm -f "/etc/systemd/nspawn/${name:?}.nspawn"
+            rm -rf "/etc/systemd/system/systemd-nspawn@${name:?}.service.d"
+            rm -rf "$ACTIVE_DIR/${name:?}"
+        done
+
+        # Reset resource counters
+        if [ -f "$RESOURCE_FILE" ]; then
+            echo "DISK_ALLOCATED=0" > "$RESOURCE_FILE"
+            echo "DISK_TOTAL=0" >> "$RESOURCE_FILE"
+            echo "  Resource counters reset."
+        fi
+
+        echo ""
+        echo "=== Rebuilding all demos ==="
+        echo ""
+
+        local exit_code=0
+        # Rebuild each demo (without --all, so they don't recurse)
+        for name in "${names[@]}"; do
+            echo "========================================"
+            echo "Rebuilding: $name"
+            echo "========================================"
+            cmd_build "$name" || exit_code=1
+        done
+
+        # Reload systemd and regenerate nginx once after all rebuilds
+        systemctl daemon-reload
+        if [ -x "$SCRIPT_DIR/nginx-gen.sh" ]; then
+            bash "$SCRIPT_DIR/nginx-gen.sh"
+        fi
+
+        return $exit_code
+    fi
+
+    # Normal rebuild: specific demos
+    if [ ${#names[@]} -eq 0 ]; then
+        echo "Error: at least one demo name required, or use --all to rebuild everything" >&2
         echo "Usage: democtl rebuild <name> [name ...]" >&2
+        echo "       democtl rebuild --all" >&2
         return 1
     fi
 
     local exit_code=0
-    for name in "$@"; do
+    for name in "${names[@]}"; do
         local demo_dir="$ACTIVE_DIR/$name"
         if [ ! -d "$demo_dir" ] || [ ! -f "$demo_dir/config" ]; then
             echo "Error: demo '$name' not found" >&2
@@ -1302,6 +1425,7 @@ Commands:
   build <name> [flags]          Build a demo (leaves it stopped; use --start to bring online)
   remove <name> [name ...]      Stop and delete demo(s)
   rebuild <name> [name ...]     Remove and re-build demo(s)
+  rebuild --all                 Rebuild ALL demos from scratch (fresh storage + Debian base)
   list                          Show all demos
   status <name> [name ...]      Detailed status for demo(s)
   logs <name> [name ...]        Show build log or container journal for demo(s)

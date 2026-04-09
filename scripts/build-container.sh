@@ -32,6 +32,9 @@ SKIP_INSTALL=false
 CONFIG_PATH=""
 BASE_NAME=""
 
+# Btrfs storage sizing
+INITIAL_SIZE_GB=20    # Start with 20GB, grow on demand
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -91,6 +94,50 @@ STORAGE_BTRFS="$DEMO_BASE_DIR/storage.btrfs"
 STORAGE_ROOT="$DEMO_BASE_DIR/storage"
 BUILDS_DIR="$STORAGE_ROOT/builds"
 
+# Build mount options based on storage backend
+if $BUILD_ON_DISK; then
+    MOUNT_OPTS="loop,compress-force=zstd:1,noatime,discard=async"
+else
+    MOUNT_OPTS="loop,noatime"
+fi
+
+# Grow the btrfs file if needed to accommodate the requested size
+grow_storage_file() {
+    local needed_mb="$1"
+    local current_size_gb=0
+    if [ -f "$STORAGE_BTRFS" ]; then
+        # Get current file size in GB
+        current_size_gb=$(du -sb "$STORAGE_BTRFS" 2>/dev/null | cut -f1 || echo 0)
+        current_size_gb=$(( current_size_gb / 1073741824 ))  # bytes -> GB
+    fi
+
+    # Calculate needed size: current usage + needed_mb + 2GB headroom
+    local needed_total_mb
+    if mountpoint -q "$STORAGE_ROOT" 2>/dev/null; then
+        local btrfs_used
+        btrfs_used=$(btrfs filesystem df "$STORAGE_ROOT" 2>/dev/null | \
+            awk '/Data, single/ {match($0, /used=([0-9.]+)([A-Za-z]+)/, a); if (a[2]=="GiB") printf "%d", a[1]*1024; else if (a[2]=="MiB") printf "%d", a[1]; else print 0}' || echo 0)
+        needed_total_mb=$(( ${btrfs_used:-0} + needed_mb + 2048 ))  # 2GB headroom
+    else
+        needed_total_mb=$(( needed_mb + 2048 ))
+    fi
+
+    local target_gb=$(( (needed_total_mb + 1023) / 1024 ))  # Round up to GB
+
+    # Enforce minimum initial size
+    if [ "$target_gb" -lt "$INITIAL_SIZE_GB" ]; then
+        target_gb=$INITIAL_SIZE_GB
+    fi
+
+    # Grow if needed
+    if [ "$target_gb" -gt "$current_size_gb" ]; then
+        echo "Growing storage.btrfs from ${current_size_gb}G to ${target_gb}G..."
+        umount -l "$STORAGE_ROOT" 2>/dev/null || true
+        truncate -s "${target_gb}G" "$STORAGE_BTRFS"
+        # Remount will happen below in ensure_storage
+    fi
+}
+
 # Ensure storage.btrfs exists and is mounted
 ensure_storage() {
     if mountpoint -q "$STORAGE_ROOT" 2>/dev/null; then
@@ -101,19 +148,19 @@ ensure_storage() {
     mkdir -p "$STORAGE_ROOT"
 
     if [ ! -f "$STORAGE_BTRFS" ]; then
-        echo "Creating storage.btrfs at $STORAGE_BTRFS..."
+        echo "Creating storage.btrfs at $STORAGE_BTRFS (${INITIAL_SIZE_GB}G initial)..."
         if $BUILD_ON_DISK; then
             # Disk storage: pre-allocate for performance
-            fallocate -l 50G "$STORAGE_BTRFS"
+            fallocate -l "${INITIAL_SIZE_GB}G" "$STORAGE_BTRFS"
             chattr +C "$STORAGE_BTRFS" 2>/dev/null || true
         else
             # RAM storage: sparse file in tmpfs (only allocates as written)
-            truncate -s 50G "$STORAGE_BTRFS"
+            truncate -s "${INITIAL_SIZE_GB}G" "$STORAGE_BTRFS"
         fi
         mkfs.btrfs -f -L iiab-demos "$STORAGE_BTRFS"
     fi
 
-    mount -o loop,compress-force=zstd:1 "$STORAGE_BTRFS" "$STORAGE_ROOT"
+    mount -o "$MOUNT_OPTS" "$STORAGE_BTRFS" "$STORAGE_ROOT"
     mkdir -p "$BUILDS_DIR"
 }
 
@@ -137,10 +184,13 @@ trap cleanup EXIT
 # Mount storage if not already mounted
 ensure_storage
 if ! mountpoint -q "$STORAGE_ROOT" 2>/dev/null; then
-    mount -o loop,compress-force=zstd:1 "$STORAGE_BTRFS" "$STORAGE_ROOT"
+    mount -o "$MOUNT_OPTS" "$STORAGE_BTRFS" "$STORAGE_ROOT"
     DID_MOUNT=true
 fi
 mkdir -p "$BUILDS_DIR"
+
+# Grow storage if needed (after mount, so btrfs filesystem df works)
+grow_storage_file "$SIZE_MB"
 
 # Resolve base subvolume
 if [ -n "$BASE_NAME" ]; then
@@ -163,7 +213,7 @@ fi
 if [ -n "${BASE_BTRFS:-}" ] && [[ "$BASE_BTRFS" != "$STORAGE_BTRFS" ]]; then
     if ! mountpoint -q "$BASE_MOUNT" 2>/dev/null; then
         mkdir -p "$BASE_MOUNT"
-        mount -o loop,compress-force=zstd:1 "$BASE_BTRFS" "$BASE_MOUNT"
+        mount -o "$MOUNT_OPTS" "$BASE_BTRFS" "$BASE_MOUNT"
     fi
 fi
 
