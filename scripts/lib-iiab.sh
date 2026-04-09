@@ -127,6 +127,7 @@ EOF
     fi
 
     # Ensure IP is actually assigned if it wasn't by networkd yet
+    sleep 1
     if ! ip addr show "$bridge" | grep -q "$gw"; then
         echo "Manually assigning IP $gw to $bridge..."
         ip addr add "$gw/24" dev "$bridge" 2>/dev/null || true

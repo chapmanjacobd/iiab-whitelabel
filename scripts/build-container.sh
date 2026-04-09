@@ -365,27 +365,10 @@ else
 #!/bin/bash
 set -euo pipefail
 
-# Wait for network to be configured by systemd-networkd
-echo "=== Network diagnostics ==="
+echo "=== Network state ==="
 ip addr show 2>&1 || true
 ip route show 2>&1 || true
 cat /etc/resolv.conf 2>&1 || true
-echo "=== systemd-networkd status ==="
-systemctl is-active systemd-networkd 2>&1 || true
-systemctl status systemd-networkd 2>&1 || true
-journalctl -u systemd-networkd --no-pager -n 20 2>&1 || true
-echo "=== .network files ==="
-ls -la /etc/systemd/network/ 2>&1 || true
-cat /etc/systemd/network/*.network 2>&1 || true
-echo "=== Waiting for default route... ==="
-for i in $(seq 1 30); do
-    if ip route show | grep -q default; then
-        echo "Network ready (attempt $i)"
-        break
-    fi
-    echo "  Waiting for network... ($i)"
-    sleep 2
-done
 
 apt update
 DEBIAN_FRONTEND=noninteractive apt upgrade -y
