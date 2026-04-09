@@ -7,7 +7,7 @@ This system manages the full lifecycle of IIAB demo instances on a Debian 13 hos
 ## Quick Start
 
 ```bash
-sudo make install
+sudo make small-medium-large
 ```
 
 ## The `democtl` CLI

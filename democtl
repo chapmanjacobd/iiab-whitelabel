@@ -358,6 +358,52 @@ cmd_build() {
         return 1
     fi
 
+    # Validate --base subvolume exists (in current or alternate storage)
+    if [ -n "$base_name" ] && [[ "$base_name" != /* ]]; then
+        local base_storage base_mount alt_storage alt_mount
+        if [ "$build_on_disk" = "true" ]; then
+            base_storage="/var/iiab-demos/storage.btrfs"
+            base_mount="/var/iiab-demos/storage"
+            alt_storage="/run/iiab-demos/storage.btrfs"
+            alt_mount="/run/iiab-demos/alt-ram-storage"
+        else
+            base_storage="/run/iiab-demos/storage.btrfs"
+            base_mount="/run/iiab-demos/storage"
+            alt_storage="/var/iiab-demos/storage.btrfs"
+            alt_mount="/var/iiab-demos/alt-disk-storage"
+        fi
+
+        local base_found=false
+        if [ -f "$base_storage" ] && mountpoint -q "$base_mount" 2>/dev/null; then
+            if btrfs subvolume show "$base_mount/$base_name" >/dev/null 2>&1; then
+                base_found=true
+            fi
+        fi
+
+        if ! $base_found && [ -f "$alt_storage" ]; then
+            if ! mountpoint -q "$alt_mount" 2>/dev/null; then
+                mkdir -p "$alt_mount"
+                mount -o loop,noatime "$alt_storage" "$alt_mount" 2>/dev/null || true
+            fi
+            if mountpoint -q "$alt_mount" 2>/dev/null; then
+                if btrfs subvolume show "$alt_mount/$base_name" >/dev/null 2>&1; then
+                    base_found=true
+                    echo "Note: Base '$base_name' will be copied from alternate storage ($alt_storage) during build."
+                fi
+            fi
+            # Clean up temp mount
+            umount -l "$alt_mount" 2>/dev/null || true
+            rmdir "$alt_mount" 2>/dev/null || true
+        fi
+
+        if ! $base_found; then
+            echo "Error: Base subvolume '$base_name' not found in current or alternate storage." >&2
+            echo "  Build the base demo first: democtl build $base_name" >&2
+            release_lock
+            return 1
+        fi
+    fi
+
     ensure_state_dirs
 
     # Acquire lock for: check resources → allocate → assign IP → write config

@@ -8,9 +8,13 @@ help:
 	bash democtl help
 
 # Full one-time setup: init → build demos → wait for builds → start → obtain SSL certs
-install:
+small-medium-large:
 	bash democtl init
-	make small medium large
+	make small
+	bash democtl settle
+	make medium
+	bash democtl settle
+	make large
 	bash democtl settle
 	bash democtl start small medium large
 	bash scripts/certbot-setup.sh
@@ -27,12 +31,14 @@ small:
 
 medium:
 	bash democtl build medium \
-		--size 20000 \
+		--base small \
+		--size 8000 \
 		--local-vars vars/local_vars_medium.yml
 
 large:
 	bash democtl build large \
-		--size 30000 \
+		--base medium \
+		--size 10000 \
 		--wildcard \
 		--local-vars vars/local_vars_large.yml
 

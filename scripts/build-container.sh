@@ -175,7 +175,11 @@ cleanup() {
         echo "Cleanup: removing failed build snapshot $NAME"
         btrfs subvolume delete "$BUILDS_DIR/$NAME" >/dev/null 2>&1 || true
     fi
-    # Note: storage mount is intentionally left mounted here -- it may be shared
+    # Unmount alternate storage if we mounted it
+    if [ "${ALT_DID_MOUNT:-false}" = "true" ] && [ -n "${ALT_MOUNT:-}" ] && mountpoint -q "$ALT_MOUNT" 2>/dev/null; then
+        umount -l "$ALT_MOUNT" 2>/dev/null || true
+    fi
+    # Note: primary storage mount is intentionally left mounted here -- it may be shared
     # across builds. The OS cleans up tmpfs mounts on process exit.
 }
 trap cleanup EXIT
@@ -209,6 +213,98 @@ if [ -n "${BASE_BTRFS:-}" ] && [[ "$BASE_BTRFS" != "$STORAGE_BTRFS" ]]; then
     if ! mountpoint -q "$BASE_MOUNT" 2>/dev/null; then
         mkdir -p "$BASE_MOUNT"
         mount -o "$MOUNT_OPTS" "$BASE_BTRFS" "$BASE_MOUNT"
+    fi
+fi
+
+# Copy a subvolume from the alternate storage.btrfs if it doesn't exist locally.
+# Used when chaining builds across storage backends (RAM ↔ disk).
+# Falls back from btrfs send/receive to cp -a --reflink=auto.
+copy_subvolume_from_alternate() {
+    local subvol_name="$1"
+    local alt_storage="$2"  # path to alternate storage.btrfs
+    local alt_mount="$3"    # mount point for alternate
+
+    if ! mountpoint -q "$alt_mount" 2>/dev/null; then
+        mkdir -p "$alt_mount"
+        mount -o loop,noatime "$alt_storage" "$alt_mount"
+        ALT_DID_MOUNT=true
+    fi
+
+    if ! btrfs subvolume show "$alt_mount/$subvol_name" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    echo "Copying subvolume '$subvol_name' from alternate storage ($alt_storage)..."
+
+    # Try btrfs send | btrfs receive first (preserves CoW metadata)
+    if btrfs send "$alt_mount/$subvol_name" 2>/dev/null | \
+        btrfs receive "$STORAGE_ROOT" >/dev/null 2>&1; then
+        echo "Subvolume copied via btrfs send/receive."
+        # Mark read-only to match source
+        btrfs property set "$STORAGE_ROOT/$subvol_name" ro true 2>/dev/null || true
+        return 0
+    fi
+
+    # Fallback: cp -a --reflink=auto
+    echo "btrfs send/receive failed, falling back to cp --reflink=auto..."
+    btrfs subvolume snapshot -r "$alt_mount/$subvol_name" "$STORAGE_ROOT/$subvol_name" 2>/dev/null && {
+        echo "Subvolume copied via read-only snapshot (cp fallback)."
+        return 0
+    }
+
+    # Last resort: plain cp
+    echo "Read-only snapshot failed, using full copy..."
+    mkdir -p "$STORAGE_ROOT/$subvol_name"
+    cp -a --reflink=auto "$alt_mount/$subvol_name"/. "$STORAGE_ROOT/$subvol_name/"
+    btrfs property set "$STORAGE_ROOT/$subvol_name" ro true 2>/dev/null || true
+    echo "Subvolume copied via cp --reflink=auto."
+    return 0
+}
+
+# Check if the base subvolume exists in the current storage; if not,
+# try to copy it from the alternate storage.btrfs.
+ALT_STORAGE=""
+ALT_MOUNT=""
+ALT_DID_MOUNT=false
+if [ "$BUILD_ON_DISK" = "true" ]; then
+    # We're on disk; alternate is RAM
+    ALT_STORAGE="/run/iiab-demos/storage.btrfs"
+    ALT_MOUNT="$DEMO_BASE_DIR/alt-ram-storage"
+else
+    # We're in RAM; alternate is disk
+    ALT_STORAGE="/var/iiab-demos/storage.btrfs"
+    ALT_MOUNT="$DEMO_BASE_DIR/alt-disk-storage"
+fi
+
+if [ -n "$BASE_NAME" ]; then
+    # User specified --base: check if it exists locally or in alternate
+    if ! btrfs subvolume show "$BASE_MOUNT/$BASE_SUBVOL" >/dev/null 2>&1; then
+        if [ -f "$ALT_STORAGE" ]; then
+            echo "Base subvolume '$BASE_SUBVOL' not in current storage, checking alternate..."
+            if copy_subvolume_from_alternate "$BASE_SUBVOL" "$ALT_STORAGE" "$ALT_MOUNT"; then
+                BASE_BTRFS="$STORAGE_BTRFS"
+                BASE_MOUNT="$STORAGE_ROOT"
+            else
+                echo "Error: Base subvolume '$BASE_SUBVOL' not found in current or alternate storage." >&2
+                exit 1
+            fi
+        else
+            echo "Error: Base subvolume '$BASE_SUBVOL' not found in current storage" >&2
+            echo "  (no alternate storage.btrfs found at $ALT_STORAGE)" >&2
+            exit 1
+        fi
+    else
+        echo "Base subvolume '$BASE_SUBVOL' found in current storage."
+    fi
+elif [ -f "$ALT_STORAGE" ]; then
+    # No --base given: check for base-debian locally, or copy from alternate
+    if ! btrfs subvolume show "$STORAGE_ROOT/base-debian" >/dev/null 2>&1; then
+        echo "base-debian not in current storage, checking alternate..."
+        if copy_subvolume_from_alternate "base-debian" "$ALT_STORAGE" "$ALT_MOUNT"; then
+            echo "base-debian copied from alternate storage."
+        else
+            echo "Warning: base-debian not found in alternate storage either -- downloading from cloud." >&2
+        fi
     fi
 fi
 
@@ -306,6 +402,12 @@ echo "=== Step 2: Preparing container rootfs ==="
 
 # Clone IIAB
 echo "Cloning IIAB from $IIAB_REPO (branch: $IIAB_BRANCH)..."
+# When building on top of an existing subvolume (--base), the parent's
+# /opt/iiab/iiab carries over via CoW. Remove it so git clone succeeds.
+if [ -d "$BUILD_SUBVOL/opt/iiab/iiab" ]; then
+    echo "Removing inherited /opt/iiab/iiab from base snapshot..."
+    rm -rf "$BUILD_SUBVOL/opt/iiab/iiab"
+fi
 mkdir -p "$BUILD_SUBVOL/opt/iiab"
 if [[ "$IIAB_BRANCH" == refs/pull/* ]]; then
     git clone --depth 1 "$IIAB_REPO" "$BUILD_SUBVOL/opt/iiab/iiab"
