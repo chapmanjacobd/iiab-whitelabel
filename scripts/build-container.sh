@@ -654,6 +654,7 @@ DEBIAN_FRONTEND=noninteractive apt upgrade -y
 # iiab-configure can pick up additional roles from the new local_vars.yml.
 if [ -f /etc/iiab/install-flags/iiab-complete ]; then
     echo "=== Incremental build detected (iiab-complete exists from base) ==="
+    echo "BUILD_TYPE:INCREMENTAL"
     rm -f /etc/iiab/install-flags/iiab-complete
     echo "Removed iiab-complete flag"
     if [ -f /etc/iiab/iiab.env ]; then
@@ -664,6 +665,7 @@ if [ -f /etc/iiab/install-flags/iiab-complete ]; then
     cd /opt/iiab/iiab && ./iiab-configure
 else
     echo "=== Fresh IIAB install ==="
+    echo "BUILD_TYPE:FRESH"
     curl -fLo /usr/sbin/iiab https://raw.githubusercontent.com/iiab/iiab-factory/master/iiab
     chmod 0755 /usr/sbin/iiab
     /usr/sbin/iiab --risky
@@ -704,10 +706,47 @@ expect -re {#\s?$} { send "/root/run_build.sh; echo \"BUILD_EXIT_CODE:\$?\"\r" }
 
 expect {
     timeout { puts "\nTimed out waiting for IIAB install"; exit 1 }
+    "BUILD_TYPE:FRESH" {
+        set build_type "fresh"
+        exp_continue
+    }
+    "BUILD_TYPE:INCREMENTAL" {
+        set build_type "incremental"
+        exp_continue
+    }
+    "photographed" {
+        if {[info exists build_type] && $build_type eq "fresh"} {
+            puts "Fresh install: saw 'photographed' (system will reboot)"
+            set saw_photographed 1
+            send "\r"
+            # Don't exp_continue - system reboots immediately, no prompt expected
+        } else {
+            exp_continue
+        }
+    }
+    -re {PLAY RECAP} {
+        set in_play_recap 1
+        exp_continue
+    }
+    -re {failed=(\[0-9\]+)} {
+        if {[info exists in_play_recap] && $in_play_recap} {
+            set failed_count $expect_out(1,string)
+            if { $failed_count > 0 } {
+                puts "\nIIAB PLAY RECAP shows failed=$failed_count (must be 0)"
+                exit 1
+            }
+            puts "PLAY RECAP shows failed=0 (success)"
+            set saw_play_recap 1
+        }
+        exp_continue
+    }
     -re "BUILD_EXIT_CODE:(\[0-9\]+)" {
         set exit_code $expect_out(1,string)
-        puts "\nIIAB build script failed with exit code: $exit_code"
-        exit 1
+        if { $exit_code != 0 } {
+            puts "\nIIAB build script failed with exit code: $exit_code"
+            exit 1
+        }
+        # For fresh installs, we ignore BUILD_EXIT_CODE and rely on "photographed"
     }
     -re {#\s?$} {
         if {![info exists exit_code]} {
@@ -715,9 +754,21 @@ expect {
             exit 1
         }
     }
-    "photographed" {
-        send "\r"
-        exp_continue
+}
+
+# Validate fresh install requirements
+if {[info exists build_type] && $build_type eq "fresh"} {
+    if {![info exists saw_photographed] || !$saw_photographed} {
+        puts "\nError: Fresh install did not print 'photographed' - install may not be complete"
+        exit 1
+    }
+}
+
+# Validate incremental install requirements
+if {[info exists build_type] && $build_type eq "incremental"} {
+    if {![info exists saw_play_recap] || !$saw_play_recap} {
+        puts "\nError: Incremental install did not show PLAY RECAP - configure may not have run"
+        exit 1
     }
 }
 
