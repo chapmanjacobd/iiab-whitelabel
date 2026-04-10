@@ -86,7 +86,8 @@ cleanup_failed_build() {
     local name="$1"
     local demo_dir="$ACTIVE_DIR/$name"
     log_demo "$name" "Cleaning up failed build..."
-    # Kill any lingering build/watchdog processes
+
+    # 1. Kill any lingering build/watchdog processes
     if [ -f "$demo_dir/build.watchdog" ]; then
         local wpid
         wpid=$(cat "$demo_dir/build.watchdog" 2>/dev/null || true)
@@ -103,6 +104,11 @@ cleanup_failed_build() {
         fi
         rm -f "$demo_dir/build.pid"
     fi
+
+    # 2. Clean up container resources (machine, veth, subvolume)
+    cleanup_demo_resources "$name"
+
+    # 3. Remove demo directory (releases IP slot)
     rm -rf "$demo_dir"
 
     # Clean up leftover lock files in the builds directory (from flock or external tools)
@@ -115,6 +121,54 @@ cleanup_failed_build() {
     done
 
     log_demo "$name" "Cleanup complete (directory and IP slot reclaimed)"
+}
+
+# Thoroughly clean up container resources: machines, veth interfaces, and subvolumes.
+# This is safe to call even if resources are already partially removed.
+cleanup_demo_resources() {
+    local name="$1"
+
+    # Force-terminate any lingering nspawn machine (essential for cleanup)
+    if machinectl show "$name" >/dev/null 2>&1; then
+        machinectl terminate "$name" 2>/dev/null || true
+        # Wait briefly for termination
+        local waited=0
+        while machinectl show "$name" >/dev/null 2>&1 && [ "$waited" -lt 5 ]; do
+            sleep 0.5
+            waited=$((waited + 1))
+        done
+    fi
+
+    # Clean up any leftover veth interfaces
+    ip link delete "ve-${name}" 2>/dev/null || true
+    ip link delete "vb-${name}" 2>/dev/null || true
+
+    # Delete the btrfs subvolume if it exists
+    local STORAGE_ROOT=""
+    if [ -f /run/iiab-demos/storage.btrfs ] && mountpoint -q /run/iiab-demos/storage 2>/dev/null; then
+        STORAGE_ROOT="/run/iiab-demos/storage"
+    elif [ -f /var/iiab-demos/storage.btrfs ] && mountpoint -q /var/iiab-demos/storage 2>/dev/null; then
+        STORAGE_ROOT="/var/iiab-demos/storage"
+    fi
+    if [ -n "$STORAGE_ROOT" ] && [ -d "$STORAGE_ROOT/builds/$name" ]; then
+        # Attempt subvolume deletion with a small retry loop if busy
+        local del_count=0
+        while ! btrfs subvolume delete --commit-each "$STORAGE_ROOT/builds/$name" >/dev/null 2>&1; do
+            [ -d "$STORAGE_ROOT/builds/$name" ] || break
+            del_count=$((del_count + 1))
+            if [ "$del_count" -ge 5 ]; then
+                break
+            fi
+            sleep 1
+        done
+    fi
+
+    # Remove image symlink in /var/lib/machines
+    rm -f "/var/lib/machines/$name"
+
+    # Remove .nspawn config and service overrides
+    rm -f "/etc/systemd/nspawn/${name}.nspawn"
+    rm -rf "/etc/systemd/system/systemd-nspawn@${name}.service.d"
 }
 
 ###############################################################################
@@ -802,22 +856,26 @@ cmd_delete() {
 
         echo "Removing demo '$name'..."
 
-        # Stop container if running or starting
+        # Stop container if running, starting, or building
         local remove_status
         remove_status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
         case "$remove_status" in
             running|starting)
-                echo "  Stopping running container..."
+                echo "  Stopping container..."
                 if ! systemctl stop "systemd-nspawn@${name}.service" 2>/dev/null; then
                     echo "  Warning: Could not stop systemd-nspawn@${name}.service (may not be running, continuing removal)"
                 fi
                 ;;
+            building|pending)
+                echo "  Cancelling in-progress build..."
+                ;;
         esac
+
         if ! systemctl disable "systemd-nspawn@${name}.service" 2>/dev/null; then
             echo "  Warning: Could not disable systemd-nspawn@${name}.service (may not be registered, continuing removal)"
         fi
 
-        # Kill any running build and watchdog
+        # Kill any running build and watchdog PIDs
         if [ -f "$demo_dir/build.watchdog" ]; then
             local wpid
             wpid=$(cat "$demo_dir/build.watchdog")
@@ -838,23 +896,8 @@ cmd_delete() {
         # Acquire lock for: read config → cleanup
         acquire_lock 0 || { exit_code=1; continue; }
 
-        # Delete the btrfs subvolume if it exists
-        local STORAGE_ROOT=""
-        if [ -f /run/iiab-demos/storage.btrfs ] && mountpoint -q /run/iiab-demos/storage 2>/dev/null; then
-            STORAGE_ROOT="/run/iiab-demos/storage"
-        elif [ -f /var/iiab-demos/storage.btrfs ] && mountpoint -q /var/iiab-demos/storage 2>/dev/null; then
-            STORAGE_ROOT="/var/iiab-demos/storage"
-        fi
-        if [ -n "$STORAGE_ROOT" ]; then
-            btrfs subvolume delete --commit-each "$STORAGE_ROOT/builds/$name" >/dev/null 2>&1 || true
-        fi
-
-        # Remove image and symlinks
-        rm -f "/var/lib/machines/$name"
-
-        # Remove .nspawn config
-        rm -f "/etc/systemd/nspawn/${name}.nspawn"
-        rm -rf "/etc/systemd/system/systemd-nspawn@${name}.service.d"
+        # Thoroughly clean up container resources (machine, veth, subvolume)
+        cleanup_demo_resources "$name"
 
         # Remove demo state (under lock -- last step frees the IP slot)
         rm -rf "$demo_dir"
@@ -1004,7 +1047,8 @@ cmd_rebuild() {
                     fi
                     ;;
                 building|pending)
-                    echo "  $name is still building (will be cleaned up below)"
+                    echo "  $name is still building (terminating)..."
+                    machinectl terminate "$name" 2>/dev/null || true
                     ;;
             esac
         done
