@@ -195,6 +195,11 @@ cleanup() {
     if [ "${BUILD_SUCCESS:-false}" = "true" ]; then
         return 0
     fi
+    # Terminate any lingering nspawn container and clean up veth
+    if [ -n "${NAME:-}" ]; then
+        machinectl terminate "$NAME" 2>/dev/null || true
+        ip link delete "vb-${NAME}" 2>/dev/null || true
+    fi
     if btrfs subvolume show "$BUILDS_DIR/$NAME" >/dev/null 2>&1; then
         echo "Cleanup: removing failed build snapshot $NAME"
         btrfs subvolume delete --commit-each "$BUILDS_DIR/$NAME" >/dev/null 2>&1 || true
@@ -556,11 +561,11 @@ if $SKIP_INSTALL; then
     systemd-firstboot --root="$BUILD_SUBVOL" --delete-root-password --force
 
     setup_bridge
-    export BUILD_SUBVOL IIAB_BRIDGE IIAB_GW IIAB_IP=$IP
+    export BUILD_SUBVOL IIAB_BRIDGE IIAB_GW IIAB_IP=$IP IIAB_NAME=$NAME
     expect << 'EXPECT_EOF'
 set timeout 60
 
-spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=off -D $env(BUILD_SUBVOL) -M box --boot
+spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=off -D $env(BUILD_SUBVOL) -M $env(IIAB_NAME) --boot
 
 expect "login: " { send "root\r" }
 expect -re {#\s?$} { send "ssh-keygen -A\r" }
@@ -608,11 +613,11 @@ EOF_SCRIPT
         exit 1
     fi
 
-    export BUILD_SUBVOL IIAB_BRIDGE IIAB_GW IIAB_IP=$IP
+    export BUILD_SUBVOL IIAB_BRIDGE IIAB_GW IIAB_IP=$IP IIAB_NAME=$NAME
     expect << 'EXPECT_EOF'
 set timeout 7200
 
-spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=off -D $env(BUILD_SUBVOL) -M box --boot
+spawn systemd-nspawn -q --network-bridge=$env(IIAB_BRIDGE) --resolv-conf=off -D $env(BUILD_SUBVOL) -M $env(IIAB_NAME) --boot
 
 expect "login: " { send "root\r" }
 expect -re {#\s?$} { send "export PAGER=cat SYSTEMD_PAGER=cat\r" }
