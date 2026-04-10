@@ -744,12 +744,13 @@ expect {
         }
         exp_continue
     }
-    -re {#\s?$} {
+    -re {#\s*$} {
         if {$build_type eq "incremental" && ![info exists exit_code]} {
             puts "\nError: Prompt detected before BUILD_EXIT_CODE -- build script likely crashed"
             exit 1
         }
-        # Prompt seen, exit block for both cases
+        puts "Prompt detected, exiting expect block"
+        # Don't exp_continue - exit block and proceed to validation
     }
 }
 
@@ -775,9 +776,12 @@ if {[info exists build_type] && $build_type eq "fresh"} {
         "login: " { send "root\r" }
         timeout { puts "\nTimed out waiting for reboot login"; exit 1 }
     }
+} else {
+    # Prompt was consumed by main block, trigger a new one
+    send "\r"
 }
-expect -re {#\s?$} { send "usermod --lock --expiredate=1 root\r" }
-expect -re {#\s?$} { send "shutdown now\r" }
+expect -re {#\s*$} { send "usermod --lock --expiredate=1 root\r" }
+expect -re {#\s*$} { send "shutdown now\r" }
 expect eof
 EXPECT_EOF
 
