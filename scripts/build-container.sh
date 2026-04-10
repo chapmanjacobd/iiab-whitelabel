@@ -724,15 +724,14 @@ expect {
             exp_continue
         }
     }
-    -re {(?s)PLAY RECAP.*?failed=(\[0-9\]+)} {
-        set failed_count $expect_out(1,string)
-        if { $failed_count > 0 } {
-            puts "\nIIAB PLAY RECAP shows failed=$failed_count (must be 0)"
-            exit 1
-        }
+    -re {failed=0} {
         puts "PLAY RECAP shows failed=0 (success)"
         set saw_play_recap 1
         exp_continue
+    }
+    -re {failed=\[1-9\]} {
+        puts "\nIIAB PLAY RECAP shows failures (failed>0)"
+        exit 1
     }
     -re "BUILD_EXIT_CODE:(\[0-9\]+)" {
         set exit_code $expect_out(1,string)
