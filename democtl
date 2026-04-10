@@ -1185,10 +1185,10 @@ cmd_list() {
     # Load resources
     load_resources
 
-    printf "%-15s %-20s %-12s %-10s %-16s %s\n" \
-        "NAME" "SUBDOMAIN" "IP" "STATUS" "SIZE/MB" "DESCRIPTION"
-    printf "%-15s %-20s %-12s %-10s %-16s %s\n" \
-        "----" "---------" "--" "------" "-------" "-----------"
+    printf "%-12s  %-18s  %-12s  %-10s  %-10s  %-10s  %s\n" \
+        "NAME" "SUBDOMAIN" "IP" "STATUS" "TOTAL/MB" "EXCL/MB" "DESCRIPTION"
+    printf "%-12s  %-18s  %-12s  %-10s  %-10s  %-10s  %s\n" \
+        "----" "---------" "--" "------" "--------" "-------" "-----------"
 
     local total_disk_used=0
     for demo_dir in "$ACTIVE_DIR"/*/; do
@@ -1201,14 +1201,14 @@ cmd_list() {
         ip=$(cat "$demo_dir/ip" 2>/dev/null || echo "?")
         local status
         status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
-        local unique_size="${UNIQUE_SIZE_MB:-$IMAGE_SIZE_MB}"
-        local size_display="${IMAGE_SIZE_MB}M (${unique_size}M unique)"
+        local total_size="${IMAGE_SIZE_MB:-?}"
+        local excl_size="${UNIQUE_SIZE_MB:-$IMAGE_SIZE_MB}"
         total_disk_used=$(( total_disk_used + IMAGE_SIZE_MB ))
         local desc="${DESCRIPTION:--}"
         local list_subdomain
         list_subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
-        printf "%-15s %-20s %-12s %-10s %-16s %s\n" \
-            "$name" "${list_subdomain}.iiab.io" "$ip" "$status" "$size_display" "$desc"
+        printf "%-12s  %-18s  %-12s  %-10s  %-10s  %-10s  %s\n" \
+            "$name" "${list_subdomain}.iiab.io" "$ip" "$status" "$total_size" "$excl_size" "$desc"
     done
 
     echo ""
@@ -1252,8 +1252,9 @@ cmd_status() {
         echo "IP:         $ip"
         echo "Status:     $status"
         echo "Volatile:   $VOLATILE_MODE"
-        local unique_size="${UNIQUE_SIZE_MB:-$IMAGE_SIZE_MB}"
-        echo "Size:       ${IMAGE_SIZE_MB}MB (${unique_size}MB unique)"
+        local total_size="${IMAGE_SIZE_MB:-?}"
+        local excl_size="${UNIQUE_SIZE_MB:-$IMAGE_SIZE_MB}"
+        echo "Size:       ${total_size}MB total, ${excl_size}MB exclusive"
         if [ -n "$DESCRIPTION" ]; then
             echo "Description: $DESCRIPTION"
         fi
@@ -1495,27 +1496,102 @@ cmd_settle() {
 }
 
 ###############################################################################
-# democtl reconcile -- fix drift in allocated resource counters
+# democtl reconcile -- fix drift in allocated resource counters and disk sizes
 ###############################################################################
 cmd_reconcile() {
     ensure_root "$@"
     ensure_state_dirs
 
-    echo "=== Reconciling resource counters ==="
+    echo "=== Reconciling resource counters and disk usage ==="
 
     acquire_lock 0 || {
         echo "Error: another operation is in progress" >&2
         return 1
     }
 
-    # load_resources dynamically calculates allocations from active configs
+    # Recalculate actual btrfs disk usage for all demos
+    local updated_count=0
+    local error_count=0
+    local total_used_mb=0
+    
+    for demo_dir in "$ACTIVE_DIR"/*/; do
+        [ -d "$demo_dir" ] || continue
+        local name
+        name=$(basename "$demo_dir")
+        
+        # Skip if currently building
+        local status
+        status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
+        if [ "$status" = "building" ] || [ "$status" = "pending" ]; then
+            echo "  Skipping '$name' (status: $status)"
+            continue
+        fi
+        
+        # Find the build subvolume path
+        local subvol_path=""
+        for storage_mount in /run/iiab-demos/storage /var/iiab-demos/storage; do
+            if mountpoint -q "$storage_mount" 2>/dev/null; then
+                local test_path="$storage_mount/builds/$name"
+                if [ -d "$test_path" ]; then
+                    subvol_path="$test_path"
+                    break
+                fi
+            fi
+        done
+        
+        if [ -z "$subvol_path" ]; then
+            echo "  Warning: '$name' - no build subvolume found on mounted storage"
+            error_count=$((error_count + 1))
+            continue
+        fi
+        
+        # Measure actual disk usage with btrfs
+        local used_mb unique_mb
+        used_mb=$(du -sm "$subvol_path" 2>/dev/null | cut -f1 || echo "")
+        unique_mb=$(btrfs filesystem du -s "$subvol_path" 2>/dev/null | awk '/^Total:/ {print int($2/1024)}' || echo "")
+        
+        if [ -z "$used_mb" ] || [ -z "$unique_mb" ]; then
+            echo "  Error: '$name' - failed to measure disk usage"
+            error_count=$((error_count + 1))
+            continue
+        fi
+        
+        # Update config file with actual values
+        local config_file="$demo_dir/config"
+        if [ -f "$config_file" ]; then
+            local old_used old_unique
+            old_used=$(grep "^IMAGE_SIZE_MB=" "$config_file" 2>/dev/null | cut -d= -f2 || echo "?")
+            old_unique=$(grep "^UNIQUE_SIZE_MB=" "$config_file" 2>/dev/null | cut -d= -f2 || echo "?")
+            
+            sed -i "s/^IMAGE_SIZE_MB=.*/IMAGE_SIZE_MB=$used_mb/" "$config_file"
+            if grep -q "^UNIQUE_SIZE_MB=" "$config_file"; then
+                sed -i "s/^UNIQUE_SIZE_MB=.*/UNIQUE_SIZE_MB=$unique_mb/" "$config_file"
+            else
+                echo "UNIQUE_SIZE_MB=$unique_mb" >> "$config_file"
+            fi
+            
+            echo "  Updated '$name': ${old_used}M -> ${used_mb}M total, ${old_unique}M -> ${unique_mb}M unique"
+            updated_count=$((updated_count + 1))
+            total_used_mb=$((total_used_mb + used_mb))
+        else
+            echo "  Error: '$name' - config file not found"
+            error_count=$((error_count + 1))
+        fi
+    done
+
+    # Also reload resource allocations from updated configs
     load_resources
     save_resources
 
     release_lock
 
-    echo "Reconciled resource allocations from active demos."
-    echo "  Disk allocated: ${DISK_ALLOCATED}MB"
+    echo ""
+    echo "Reconciliation complete."
+    echo "  Demos updated: $updated_count"
+    echo "  Errors: $error_count"
+    echo "  Total actual disk usage: ${total_used_mb}MB"
+    echo "  Disk allocated (from configs): ${DISK_ALLOCATED}MB"
+    echo "  Disk total (system): ${DISK_TOTAL}MB"
 
     # Check for ghost IPs (IPs assigned but no running container)
     echo ""
