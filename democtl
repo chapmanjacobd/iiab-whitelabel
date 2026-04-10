@@ -1146,11 +1146,11 @@ cmd_rebuild() {
         fi
 
         # Extract values before removal.
-        local IIAB_BRANCH IIAB_REPO IMAGE_SIZE_MB VOLATILE_MODE BUILD_ON_DISK SKIP_INSTALL LOCAL_VARS WILDCARD DESCRIPTION BASE_NAME
+        local IIAB_BRANCH IIAB_REPO IMAGE_SIZE_MB VOLATILE_MODE BUILD_ON_DISK SKIP_INSTALL LOCAL_VARS WILDCARD DESCRIPTION BASE_NAME UNIQUE_SIZE_MB
         eval "$( (
             # shellcheck source=/dev/null
             source "$demo_dir/config"
-            for _rebuild_var in IIAB_BRANCH IIAB_REPO IMAGE_SIZE_MB VOLATILE_MODE BUILD_ON_DISK SKIP_INSTALL LOCAL_VARS WILDCARD DESCRIPTION BASE_NAME; do
+            for _rebuild_var in IIAB_BRANCH IIAB_REPO IMAGE_SIZE_MB VOLATILE_MODE BUILD_ON_DISK SKIP_INSTALL LOCAL_VARS WILDCARD DESCRIPTION BASE_NAME UNIQUE_SIZE_MB; do
                 printf '%s=%q\n' "$_rebuild_var" "${!_rebuild_var:-}"
             done
         ) )"
@@ -1185,9 +1185,9 @@ cmd_list() {
     # Load resources
     load_resources
 
-    printf "%-15s %-20s %-12s %-10s %-10s %s\n" \
+    printf "%-15s %-20s %-12s %-10s %-16s %s\n" \
         "NAME" "SUBDOMAIN" "IP" "STATUS" "SIZE/MB" "DESCRIPTION"
-    printf "%-15s %-20s %-12s %-10s %-10s %s\n" \
+    printf "%-15s %-20s %-12s %-10s %-16s %s\n" \
         "----" "---------" "--" "------" "-------" "-----------"
 
     local total_disk_used=0
@@ -1201,12 +1201,13 @@ cmd_list() {
         ip=$(cat "$demo_dir/ip" 2>/dev/null || echo "?")
         local status
         status=$(cat "$demo_dir/status" 2>/dev/null || echo "unknown")
-        local size_display="${IMAGE_SIZE_MB}M"
+        local unique_size="${UNIQUE_SIZE_MB:-$IMAGE_SIZE_MB}"
+        local size_display="${IMAGE_SIZE_MB}M (${unique_size}M unique)"
         total_disk_used=$(( total_disk_used + IMAGE_SIZE_MB ))
         local desc="${DESCRIPTION:--}"
         local list_subdomain
         list_subdomain=$(sanitize_subdomain "${SUBDOMAIN:-$name}")
-        printf "%-15s %-20s %-12s %-10s %-10s %s\n" \
+        printf "%-15s %-20s %-12s %-10s %-16s %s\n" \
             "$name" "${list_subdomain}.iiab.io" "$ip" "$status" "$size_display" "$desc"
     done
 
@@ -1251,7 +1252,8 @@ cmd_status() {
         echo "IP:         $ip"
         echo "Status:     $status"
         echo "Volatile:   $VOLATILE_MODE"
-        echo "Size:       ${IMAGE_SIZE_MB}MB"
+        local unique_size="${UNIQUE_SIZE_MB:-$IMAGE_SIZE_MB}"
+        echo "Size:       ${IMAGE_SIZE_MB}MB (${unique_size}MB unique)"
         if [ -n "$DESCRIPTION" ]; then
             echo "Description: $DESCRIPTION"
         fi

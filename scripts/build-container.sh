@@ -802,6 +802,8 @@ echo "=== Step 4: Cleaning and finalizing ==="
     echo "Branch: $IIAB_BRANCH"
     echo "Repo: $IIAB_REPO"
     echo "Volatile: $VOLATILE_MODE"
+    echo "Size: ${USED_MB}MB"
+    echo "Unique: ${UNIQUE_MB}MB"
 } >> "$BUILD_SUBVOL/.iiab-image"
 
 # Clean up
@@ -829,14 +831,20 @@ systemd-firstboot --root="$BUILD_SUBVOL" --timezone=UTC --force
 # Mark as read-only to signal build is complete and prevent accidental writes
 btrfs property set "$BUILD_SUBVOL" ro true
 
-# Measure final size
+# Measure final size (both total/apparent and unique/exclusive)
 USED_MB=$(du -sm "$BUILD_SUBVOL" | cut -f1)
-echo "Final image size: ${USED_MB}MB"
+UNIQUE_MB=$(btrfs filesystem du -s "$BUILD_SUBVOL" 2>/dev/null | awk '/^Total:/ {print int($2/1024)}' || echo "$USED_MB")
+echo "Final image size: ${USED_MB}MB (unique: ${UNIQUE_MB}MB)"
 
-# Update config with actual size
+# Update config with actual sizes
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
     sed -i "s/^IMAGE_SIZE_MB=.*/IMAGE_SIZE_MB=$USED_MB/" "$CONFIG_PATH"
-    echo "Updated config IMAGE_SIZE_MB: $IMAGE_SIZE_MB -> $USED_MB"
+    if grep -q "^UNIQUE_SIZE_MB=" "$CONFIG_PATH"; then
+        sed -i "s/^UNIQUE_SIZE_MB=.*/UNIQUE_SIZE_MB=$UNIQUE_MB/" "$CONFIG_PATH"
+    else
+        echo "UNIQUE_SIZE_MB=$UNIQUE_MB" >> "$CONFIG_PATH"
+    fi
+    echo "Updated config IMAGE_SIZE_MB: $IMAGE_SIZE_MB -> $USED_MB (unique: $UNIQUE_MB)"
 fi
 
 # Prevent cleanup from deleting our successful build
