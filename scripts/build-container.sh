@@ -23,7 +23,7 @@ source "$SCRIPT_DIR/lib-iiab.sh"
 NAME=""
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
-SIZE_MB=15000
+IMAGE_SIZE_MB=15000
 VOLATILE_MODE="overlay"
 IP=""
 LOCAL_VARS=""
@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
         --name)       NAME="$2"; shift 2 ;;
         --repo)       IIAB_REPO="$2"; shift 2 ;;
         --branch)     IIAB_BRANCH="$2"; shift 2 ;;
-        --size)       SIZE_MB="$2"; shift 2 ;;
+        --size)       IMAGE_SIZE_MB="$2"; shift 2 ;;
         --volatile)   VOLATILE_MODE="$2"; shift 2 ;;
         --ip)         IP="$2"; shift 2 ;;
         --local-vars) LOCAL_VARS="$2"; shift 2 ;;
@@ -79,7 +79,7 @@ echo "Building IIAB container: $NAME"
 echo "=========================================="
 echo "Branch:       $IIAB_BRANCH"
 echo "Repo:         $IIAB_REPO"
-echo "Size:         ${SIZE_MB}MB (capacity)"
+echo "Size:         ${IMAGE_SIZE_MB}MB (capacity)"
 echo "Volatile:     $VOLATILE_MODE"
 echo "IP:           $IP"
 echo "Build on disk: $BUILD_ON_DISK"
@@ -235,7 +235,7 @@ ensure_storage
 mkdir -p "$BUILDS_DIR"
 
 # Grow storage if needed (after mount, so btrfs filesystem df works)
-grow_storage_file "$SIZE_MB"
+grow_storage_file "$IMAGE_SIZE_MB"
 
 # Resolve base subvolume
 if [ -n "$BASE_NAME" ]; then
@@ -265,45 +265,45 @@ fi
 # Copy a subvolume from the alternate storage.btrfs if it doesn't exist locally.
 # Used when chaining builds across storage backends (RAM ↔ disk).
 copy_subvolume_from_alternate() {
-    local subvol_name="$1"
-    local alt_storage="$2"  # path to alternate storage.btrfs
-    local alt_mount="$3"    # mount point for alternate
+    local ALT_SUBVOL="$1"
+    local ALT_STORAGE="$2"  # path to alternate storage.btrfs
+    local ALT_MOUNT="$3"    # mount point for alternate
 
-    if ! mountpoint -q "$alt_mount" 2>/dev/null; then
-        mkdir -p "$alt_mount"
-        mount -o loop,noatime "$alt_storage" "$alt_mount"
+    if ! mountpoint -q "$ALT_MOUNT" 2>/dev/null; then
+        mkdir -p "$ALT_MOUNT"
+        mount -o loop,noatime "$ALT_STORAGE" "$ALT_MOUNT"
         # Use file-based flag so cleanup trap can see it even across subshells
         STATE_FILE_ALT_MOUNT="${DEMO_BASE_DIR}/.alt_mounted"
         touch "$STATE_FILE_ALT_MOUNT"
     fi
 
-    if ! btrfs subvolume show "$alt_mount/$subvol_name" >/dev/null 2>&1; then
+    if ! btrfs subvolume show "$ALT_MOUNT/$ALT_SUBVOL" >/dev/null 2>&1; then
         return 1
     fi
 
-    echo "Copying subvolume '$subvol_name' from alternate storage ($alt_storage)..."
+    echo "Copying subvolume '$ALT_SUBVOL' from alternate storage ($ALT_STORAGE)..."
 
     # Try btrfs send | btrfs receive first (preserves CoW metadata)
-    if btrfs send "$alt_mount/$subvol_name" 2>/dev/null | \
+    if btrfs send "$ALT_MOUNT/$ALT_SUBVOL" 2>/dev/null | \
         btrfs receive "$STORAGE_ROOT" >/dev/null 2>&1; then
         echo "Subvolume copied via btrfs send/receive."
         # Mark read-only to match source
-        btrfs property set "$STORAGE_ROOT/$subvol_name" ro true 2>/dev/null || true
+        btrfs property set "$STORAGE_ROOT/$ALT_SUBVOL" ro true 2>/dev/null || true
         return 0
     fi
 
     # Fallback: cp -a --reflink=auto
     echo "btrfs send/receive failed, falling back to cp --reflink=auto..."
-    btrfs subvolume snapshot -r "$alt_mount/$subvol_name" "$STORAGE_ROOT/$subvol_name" 2>/dev/null && {
+    btrfs subvolume snapshot -r "$ALT_MOUNT/$ALT_SUBVOL" "$STORAGE_ROOT/$ALT_SUBVOL" 2>/dev/null && {
         echo "Subvolume copied via read-only snapshot (cp fallback)."
         return 0
     }
 
     # Last resort: plain cp
     echo "Read-only snapshot failed, using full copy..."
-    mkdir -p "$STORAGE_ROOT/$subvol_name"
-    cp -a --reflink=auto "$alt_mount/$subvol_name"/. "$STORAGE_ROOT/$subvol_name/"
-    btrfs property set "$STORAGE_ROOT/$subvol_name" ro true 2>/dev/null || true
+    mkdir -p "$STORAGE_ROOT/$ALT_SUBVOL"
+    cp -a --reflink=auto "$ALT_MOUNT/$ALT_SUBVOL"/. "$STORAGE_ROOT/$ALT_SUBVOL/"
+    btrfs property set "$STORAGE_ROOT/$ALT_SUBVOL" ro true 2>/dev/null || true
     echo "Subvolume copied via cp --reflink=auto."
     return 0
 }
@@ -757,7 +757,7 @@ echo "Final image size: ${USED_MB}MB"
 # Update config with actual size
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
     sed -i "s/^IMAGE_SIZE_MB=.*/IMAGE_SIZE_MB=$USED_MB/" "$CONFIG_PATH"
-    echo "Updated config IMAGE_SIZE_MB: $SIZE_MB -> $USED_MB"
+    echo "Updated config IMAGE_SIZE_MB: $IMAGE_SIZE_MB -> $USED_MB"
 fi
 
 # Prevent cleanup from deleting our successful build

@@ -124,29 +124,29 @@ grow_storage() {
     local build_on_disk="$1"
     local needed_mb="$2"
 
-    local storage_btrfs storage_root
+    local STORAGE_BTRFS STORAGE_ROOT
     if [ "$build_on_disk" = "true" ]; then
-        storage_btrfs="/var/iiab-demos/storage.btrfs"
-        storage_root="/var/iiab-demos/storage"
+        STORAGE_BTRFS="/var/iiab-demos/storage.btrfs"
+        STORAGE_ROOT="/var/iiab-demos/storage"
     else
-        storage_btrfs="/run/iiab-demos/storage.btrfs"
-        storage_root="/run/iiab-demos/storage"
+        STORAGE_BTRFS="/run/iiab-demos/storage.btrfs"
+        STORAGE_ROOT="/run/iiab-demos/storage"
     fi
 
     # Must be mounted for btrfs filesystem df to work
-    if ! mountpoint -q "$storage_root" 2>/dev/null; then
+    if ! mountpoint -q "$STORAGE_ROOT" 2>/dev/null; then
         return 1
     fi
 
     local current_size_gb=0
-    if [ -f "$storage_btrfs" ]; then
+    if [ -f "$STORAGE_BTRFS" ]; then
         local size_bytes
-        size_bytes=$(stat -c%s "$storage_btrfs" 2>/dev/null || echo 0)
+        size_bytes=$(stat -c%s "$STORAGE_BTRFS" 2>/dev/null || echo 0)
         current_size_gb=$(( size_bytes / 1073741824 ))
     fi
 
     local btrfs_used
-    btrfs_used=$(btrfs filesystem df "$storage_root" 2>/dev/null | \
+    btrfs_used=$(btrfs filesystem df "$STORAGE_ROOT" 2>/dev/null | \
         awk '/Data, single/ {match($0, /used=([0-9.]+)([A-Za-z]+)/, a); if (a[2]=="GiB") printf "%d", a[1]*1024; else if (a[2]=="MiB") printf "%d", a[1]; else print 0}' || echo 0)
     local needed_total_mb=$(( ${btrfs_used:-0} + needed_mb + 2048 ))  # 2GB headroom
     local target_gb=$(( (needed_total_mb + 1023) / 1024 ))
@@ -166,24 +166,24 @@ grow_storage() {
     for machine in $(machinectl list --no-legend 2>/dev/null | awk '{print $1}' || true); do
         local root_path
         root_path=$(machinectl show "$machine" -p RootDirectory --value 2>/dev/null || echo "")
-        if [[ "$root_path" == "$storage_root"* ]]; then
+        if [[ "$root_path" == "$STORAGE_ROOT"* ]]; then
             echo "Warning: container '$machine' is using storage -- cannot resize" >&2
             return 1
         fi
     done
 
-    echo "Growing ${storage_btrfs} from ${current_size_gb}G to ${target_gb}G..."
-    btrfs filesystem sync "$storage_root" 2>/dev/null || true
-    btrfs subvolume sync "$storage_root" 2>/dev/null || true
+    echo "Growing ${STORAGE_BTRFS} from ${current_size_gb}G to ${target_gb}G..."
+    btrfs filesystem sync "$STORAGE_ROOT" 2>/dev/null || true
+    btrfs subvolume sync "$STORAGE_ROOT" 2>/dev/null || true
     sync
-    umount "$storage_root"
-    truncate -s "${target_gb}G" "$storage_btrfs"
+    umount "$STORAGE_ROOT"
+    truncate -s "${target_gb}G" "$STORAGE_BTRFS"
     if [ "$build_on_disk" = "true" ]; then
-        mount -o loop,compress-force=zstd:1,noatime,discard=async "$storage_btrfs" "$storage_root"
+        mount -o loop,compress-force=zstd:1,noatime,discard=async "$STORAGE_BTRFS" "$STORAGE_ROOT"
     else
-        mount -o loop,noatime "$storage_btrfs" "$storage_root"
+        mount -o loop,noatime "$STORAGE_BTRFS" "$STORAGE_ROOT"
     fi
-    echo "Storage grown to ${target_gb}G ($(df -h "$storage_root" | awk 'NR==2 {print $4}') available)"
+    echo "Storage grown to ${target_gb}G ($(df -h "$STORAGE_ROOT" | awk 'NR==2 {print $4}') available)"
 }
 
 ###############################################################################
@@ -460,40 +460,41 @@ cmd_build() {
 
     # Validate --base subvolume exists (in current or alternate storage)
     if [ -n "$base_name" ] && [[ "$base_name" != /* ]]; then
-        local base_storage base_mount alt_storage alt_mount
+        local BASE_BTRFS BASE_MOUNT ALT_STORAGE ALT_MOUNT
         if [ "$build_on_disk" = "true" ]; then
-            base_storage="/var/iiab-demos/storage.btrfs"
-            base_mount="/var/iiab-demos/storage"
-            alt_storage="/run/iiab-demos/storage.btrfs"
-            alt_mount="/run/iiab-demos/alt-ram-storage"
+            BASE_BTRFS="/var/iiab-demos/storage.btrfs"
+            BASE_MOUNT="/var/iiab-demos/storage"
+            ALT_STORAGE="/run/iiab-demos/storage.btrfs"
+            ALT_MOUNT="/run/iiab-demos/alt-ram-storage"
         else
-            base_storage="/run/iiab-demos/storage.btrfs"
-            base_mount="/run/iiab-demos/storage"
-            alt_storage="/var/iiab-demos/storage.btrfs"
-            alt_mount="/var/iiab-demos/alt-disk-storage"
+            BASE_BTRFS="/run/iiab-demos/storage.btrfs"
+            BASE_MOUNT="/run/iiab-demos/storage"
+            ALT_STORAGE="/var/iiab-demos/storage.btrfs"
+            ALT_MOUNT="/var/iiab-demos/alt-disk-storage"
         fi
 
+        local BASE_SUBVOL="builds/$base_name"
         local base_found=false
-        if [ -f "$base_storage" ] && mountpoint -q "$base_mount" 2>/dev/null; then
-            if btrfs subvolume show "$base_mount/builds/$base_name" >/dev/null 2>&1; then
+        if [ -f "$BASE_BTRFS" ] && mountpoint -q "$BASE_MOUNT" 2>/dev/null; then
+            if btrfs subvolume show "$BASE_MOUNT/$BASE_SUBVOL" >/dev/null 2>&1; then
                 base_found=true
             fi
         fi
 
-        if ! $base_found && [ -f "$alt_storage" ]; then
-            if ! mountpoint -q "$alt_mount" 2>/dev/null; then
-                mkdir -p "$alt_mount"
-                mount -o loop,noatime "$alt_storage" "$alt_mount" 2>/dev/null || true
+        if ! $base_found && [ -f "$ALT_STORAGE" ]; then
+            if ! mountpoint -q "$ALT_MOUNT" 2>/dev/null; then
+                mkdir -p "$ALT_MOUNT"
+                mount -o loop,noatime "$ALT_STORAGE" "$ALT_MOUNT" 2>/dev/null || true
             fi
-            if mountpoint -q "$alt_mount" 2>/dev/null; then
-                if btrfs subvolume show "$alt_mount/builds/$base_name" >/dev/null 2>&1; then
+            if mountpoint -q "$ALT_MOUNT" 2>/dev/null; then
+                if btrfs subvolume show "$ALT_MOUNT/$BASE_SUBVOL" >/dev/null 2>&1; then
                     base_found=true
-                    echo "Note: Base '$base_name' will be copied from alternate storage ($alt_storage) during build."
+                    echo "Note: Base '$base_name' will be copied from alternate storage ($ALT_STORAGE) during build."
                 fi
             fi
             # Clean up temp mount
-            umount -l "$alt_mount" 2>/dev/null || true
-            rmdir "$alt_mount" 2>/dev/null || true
+            umount -l "$ALT_MOUNT" 2>/dev/null || true
+            rmdir "$ALT_MOUNT" 2>/dev/null || true
         fi
 
         if ! $base_found; then
@@ -573,14 +574,14 @@ DEMO_NAME="$name"
 IIAB_REPO="$repo"
 IIAB_BRANCH="$branch"
 IMAGE_SIZE_MB=$size_mb
-VOLATILE="$volatile"
+VOLATILE_MODE="$volatile"
 BUILD_ON_DISK=$build_on_disk
 SKIP_INSTALL=$skip_install
 CLEANUP_FAILED=$cleanup_failed
 LOCAL_VARS="$local_vars"
 WILDCARD=$wildcard
 DESCRIPTION="$description"
-IIAB_BASE="$base_name"
+BASE_NAME="$base_name"
 EOF
 
     echo "$ip" > "$demo_dir/ip"
@@ -707,7 +708,7 @@ build_demo() {
         "--repo" "$IIAB_REPO"
         "--branch" "$IIAB_BRANCH"
         "--size" "$IMAGE_SIZE_MB"
-        "--volatile" "$VOLATILE"
+        "--volatile" "$VOLATILE_MODE"
         "--ip" "$ip"
         "--config" "$demo_dir/config"
     )
@@ -728,11 +729,11 @@ build_demo() {
         build_args+=("--local-vars" "$LOCAL_VARS")
     fi
 
-    if [ -n "${IIAB_BASE:-}" ]; then
-        build_args+=("--base" "$IIAB_BASE")
+    if [ -n "${BASE_NAME:-}" ]; then
+        build_args+=("--base" "$BASE_NAME")
     fi
 
-    log_demo "$name" "Building: branch=$IIAB_BRANCH volatile=$VOLATILE build_on_disk=${BUILD_ON_DISK:-false}"
+    log_demo "$name" "Building: branch=$IIAB_BRANCH volatile=$VOLATILE_MODE build_on_disk=${BUILD_ON_DISK:-false}"
     log_demo "$name" "This will take 30-60 minutes..."
 
     if ! bash "$build_script" "${build_args[@]}"; then
@@ -743,7 +744,7 @@ build_demo() {
 
     # Create .nspawn service files
     local service_script="${SCRIPT_DIR}/container-service.sh"
-    local svc_args=("$name" "$ip" "--volatile=$VOLATILE")
+    local svc_args=("$name" "$ip" "--volatile=$VOLATILE_MODE")
 
     if [ -x "$service_script" ]; then
         bash "$service_script" "${svc_args[@]}"
@@ -838,14 +839,14 @@ cmd_delete() {
         acquire_lock 0 || { exit_code=1; continue; }
 
         # Delete the btrfs subvolume if it exists
-        local storage_mount=""
+        local STORAGE_ROOT=""
         if [ -f /run/iiab-demos/storage.btrfs ] && mountpoint -q /run/iiab-demos/storage 2>/dev/null; then
-            storage_mount="/run/iiab-demos/storage"
+            STORAGE_ROOT="/run/iiab-demos/storage"
         elif [ -f /var/iiab-demos/storage.btrfs ] && mountpoint -q /var/iiab-demos/storage 2>/dev/null; then
-            storage_mount="/var/iiab-demos/storage"
+            STORAGE_ROOT="/var/iiab-demos/storage"
         fi
-        if [ -n "$storage_mount" ]; then
-            btrfs subvolume delete --commit-each "$storage_mount/builds/$name" >/dev/null 2>&1 || true
+        if [ -n "$STORAGE_ROOT" ]; then
+            btrfs subvolume delete --commit-each "$STORAGE_ROOT/builds/$name" >/dev/null 2>&1 || true
         fi
 
         # Remove image and symlinks
@@ -1018,10 +1019,10 @@ cmd_rebuild() {
         # Phase 4: Unmount storage and delete btrfs files
         echo ""
         echo "=== Tearing down storage ==="
-        for storage_mount in /run/iiab-demos/storage /var/iiab-demos/storage; do
-            if mountpoint -q "$storage_mount" 2>/dev/null; then
-                echo "  Unmounting $storage_mount..."
-                umount -l "$storage_mount" 2>/dev/null || true
+        for STORAGE_ROOT in /run/iiab-demos/storage /var/iiab-demos/storage; do
+            if mountpoint -q "$STORAGE_ROOT" 2>/dev/null; then
+                echo "  Unmounting $STORAGE_ROOT..."
+                umount -l "$STORAGE_ROOT" 2>/dev/null || true
             fi
         done
         # Wait briefly for lazy unmounts to settle
@@ -1101,11 +1102,11 @@ cmd_rebuild() {
         fi
 
         # Extract values before removal.
-        local IIAB_BRANCH IIAB_REPO IMAGE_SIZE_MB VOLATILE BUILD_ON_DISK SKIP_INSTALL LOCAL_VARS WILDCARD DESCRIPTION IIAB_BASE
+        local IIAB_BRANCH IIAB_REPO IMAGE_SIZE_MB VOLATILE_MODE BUILD_ON_DISK SKIP_INSTALL LOCAL_VARS WILDCARD DESCRIPTION BASE_NAME
         eval "$( (
             # shellcheck source=/dev/null
             source "$demo_dir/config"
-            for _rebuild_var in IIAB_BRANCH IIAB_REPO IMAGE_SIZE_MB VOLATILE BUILD_ON_DISK SKIP_INSTALL LOCAL_VARS WILDCARD DESCRIPTION IIAB_BASE; do
+            for _rebuild_var in IIAB_BRANCH IIAB_REPO IMAGE_SIZE_MB VOLATILE_MODE BUILD_ON_DISK SKIP_INSTALL LOCAL_VARS WILDCARD DESCRIPTION BASE_NAME; do
                 printf '%s=%q\n' "$_rebuild_var" "${!_rebuild_var:-}"
             done
         ) )"
@@ -1117,13 +1118,13 @@ cmd_rebuild() {
         [ -n "${IIAB_BRANCH:-}" ] && add_args+=("--branch" "$IIAB_BRANCH")
         [ -n "${IIAB_REPO:-}" ] && add_args+=("--repo" "$IIAB_REPO")
         [ -n "${IMAGE_SIZE_MB:-}" ] && add_args+=("--size" "$IMAGE_SIZE_MB")
-        [ -n "${VOLATILE:-}" ] && add_args+=("--volatile" "$VOLATILE")
+        [ -n "${VOLATILE_MODE:-}" ] && add_args+=("--volatile" "$VOLATILE_MODE")
         [ "${BUILD_ON_DISK:-false}" = "true" ] && add_args+=("--build-on-disk")
         [ "${SKIP_INSTALL:-false}" = "true" ] && add_args+=("--skip-install")
         [ -n "${LOCAL_VARS:-}" ] && add_args+=("--local-vars" "$LOCAL_VARS")
         [ "${WILDCARD:-false}" = "true" ] && add_args+=("--wildcard")
         [ -n "${DESCRIPTION:-}" ] && add_args+=("--description" "$DESCRIPTION")
-        [ -n "${IIAB_BASE:-}" ] && add_args+=("--base" "$IIAB_BASE")
+        [ -n "${BASE_NAME:-}" ] && add_args+=("--base" "$BASE_NAME")
 
         cmd_build "${add_args[@]}" || exit_code=1
     done
@@ -1205,7 +1206,7 @@ cmd_status() {
         echo "Repo:       $IIAB_REPO"
         echo "IP:         $ip"
         echo "Status:     $status"
-        echo "Volatile:   $VOLATILE"
+        echo "Volatile:   $VOLATILE_MODE"
         echo "Size:       ${IMAGE_SIZE_MB}MB"
         if [ -n "$DESCRIPTION" ]; then
             echo "Description: $DESCRIPTION"

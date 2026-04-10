@@ -88,13 +88,13 @@ DEMO_NAME="testdemo"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=12000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
 WILDCARD=false
 DESCRIPTION=""
-IIAB_BASE=""
+BASE_NAME=""
 EOF
 
 # Acquire lock and test the cleanup logic
@@ -125,13 +125,13 @@ DEMO_NAME="testdemo2"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=12000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
 WILDCARD=false
 DESCRIPTION=""
-IIAB_BASE=""
+BASE_NAME=""
 EOF
 
 acquire_lock 0
@@ -159,13 +159,13 @@ DEMO_NAME="testdemo3"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=12000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
 WILDCARD=false
 DESCRIPTION=""
-IIAB_BASE=""
+BASE_NAME=""
 EOF
 
 acquire_lock 0
@@ -193,13 +193,13 @@ DEMO_NAME="testdemo4"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=12000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
 WILDCARD=false
 DESCRIPTION=""
-IIAB_BASE=""
+BASE_NAME=""
 EOF
 
 acquire_lock 0
@@ -228,13 +228,13 @@ DEMO_NAME="testdemo5"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=12000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
 WILDCARD=false
 DESCRIPTION=""
-IIAB_BASE=""
+BASE_NAME=""
 EOF
 
 acquire_lock 0

@@ -24,14 +24,14 @@ NAME="${1:?Error: container name required}"
 IP="${2:?Error: IP address required}"
 shift 2 || true
 
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --volatile=*)
-            VOLATILE="${1#--volatile=}"
-            if [[ ! "$VOLATILE" =~ ^(no|overlay|state|yes)$ ]]; then
-                echo "Error: --volatile must be 'no', 'overlay', 'state', or 'yes' (got: $VOLATILE)" >&2
+            VOLATILE_MODE="${1#--volatile=}"
+            if [[ ! "$VOLATILE_MODE" =~ ^(no|overlay|state|yes)$ ]]; then
+                echo "Error: --volatile must be 'no', 'overlay', 'state', or 'yes' (got: $VOLATILE_MODE)" >&2
                 exit 1
             fi
             ;;
@@ -56,8 +56,8 @@ mkdir -p "$SETTINGS_DIR"
 
 # Build the [Files] section
 FILES_SECTION=""
-if [[ "$VOLATILE" != "no" ]]; then
-    FILES_SECTION="Volatile=${VOLATILE}"
+if [[ "$VOLATILE_MODE" != "no" ]]; then
+    FILES_SECTION="Volatile=${VOLATILE_MODE}"
 fi
 
 cat > "${SETTINGS_DIR}/${NAME}.nspawn" << EOF
@@ -78,7 +78,7 @@ EOF
 echo "Created ${SETTINGS_DIR}/${NAME}.nspawn"
 echo "  Rootfs:    $ROOTFS"
 echo "  IP:        ${IP}"
-echo "  Volatile:  ${VOLATILE}"
+echo "  Volatile:  ${VOLATILE_MODE}"
 
 # Create systemd service override
 SERVICE_OVERRIDE="/etc/systemd/system/systemd-nspawn@${NAME}.service.d"

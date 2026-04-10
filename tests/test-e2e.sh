@@ -161,7 +161,7 @@ DEMO_NAME="test-demo"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
@@ -183,7 +183,7 @@ source "$DEMO_DIR/config"
 assert_equals "test-demo" "$DEMO_NAME" "Demo name in config"
 assert_equals "master" "$IIAB_BRANCH" "Branch in config"
 assert_equals "2000" "$IMAGE_SIZE_MB" "Size in config"
-assert_equals "overlay" "$VOLATILE" "Volatile mode in config"
+assert_equals "overlay" "$VOLATILE_MODE" "Volatile mode in config"
 
 # Test 4: Demo status reading
 echo ""
@@ -199,7 +199,7 @@ DEMO_NAME="demo-$status"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
@@ -230,7 +230,7 @@ DEMO_NAME="to-delete"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
@@ -262,7 +262,7 @@ DEMO_NAME="demo-$i"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=$((2000 * i))
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
@@ -292,7 +292,7 @@ DEMO_NAME="rebuild-test"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
@@ -321,7 +321,7 @@ DEMO_NAME="config-test"
 IIAB_REPO="https://github.com/custom/iiab.git"
 IIAB_BRANCH="feature-branch"
 IMAGE_SIZE_MB=5000
-VOLATILE="state"
+VOLATILE_MODE="state"
 BUILD_ON_DISK=true
 SKIP_INSTALL=true
 LOCAL_VARS="/path/to/vars.yml"
@@ -340,7 +340,7 @@ assert_equals "config-test" "$DEMO_NAME" "Config: demo name"
 assert_equals "https://github.com/custom/iiab.git" "$IIAB_REPO" "Config: custom repo"
 assert_equals "feature-branch" "$IIAB_BRANCH" "Config: custom branch"
 assert_equals "5000" "$IMAGE_SIZE_MB" "Config: image size"
-assert_equals "state" "$VOLATILE" "Config: volatile mode"
+assert_equals "state" "$VOLATILE_MODE" "Config: volatile mode"
 assert_equals "true" "$BUILD_ON_DISK" "Config: build on disk"
 assert_equals "true" "$SKIP_INSTALL" "Config: skip install"
 assert_equals "/path/to/vars.yml" "$LOCAL_VARS" "Config: local vars path"
@@ -361,7 +361,7 @@ DEMO_NAME="status-demo"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
@@ -401,7 +401,7 @@ DEMO_NAME="special-chars"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
@@ -429,7 +429,7 @@ DEMO_NAME="ip-test-$i"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
@@ -476,7 +476,7 @@ DEMO_NAME="relative-vars"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS="vars/local_vars.yml"
@@ -502,7 +502,7 @@ DEMO_NAME="scalability-test-$i"
 IIAB_REPO="https://github.com/iiab/iiab.git"
 IIAB_BRANCH="master"
 IMAGE_SIZE_MB=2000
-VOLATILE="overlay"
+VOLATILE_MODE="overlay"
 BUILD_ON_DISK=false
 SKIP_INSTALL=false
 LOCAL_VARS=""
