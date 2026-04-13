@@ -7,49 +7,59 @@ on:
     branches: [ main ]
 
 jobs:
-  shellcheck:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install shellcheck
-        run: sudo apt-get install -y shellcheck
-      - name: Run shellcheck
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+      - name: Install golangci-lint
         run: |
-          shellcheck democtl
-          shellcheck scripts/*.sh
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+      - name: Run linter
+        run: make lint
 
-  tests:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y nftables
-      - name: Validate scripts syntax
-        run: |
-          bash -n democtl
-          for f in scripts/*.sh; do bash -n "$f"; done
-          for f in tests/*.sh; do bash -n "$f"; done
-      - name: Test democtl help
-        run: ./democtl help
-      - name: Test democtl list (empty)
-        run: sudo ./democtl list
-      - name: Run concurrency tests
-        run: sudo bash tests/test-concurrency.sh
-      - name: Run e2e tests
-        run: sudo bash tests/test-e2e.sh
-      - name: Run nginx generation tests
-        run: sudo bash tests/test-nginx-gen.sh
-      - name: Run nftables isolation tests
-        run: sudo bash tests/test-nftables.sh
-      - name: Run empirical isolation tests
-        run: sudo bash tests/test-isolation-empirical.sh
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+      - name: Run unit tests
+        run: make test
+
+  test-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+      - name: Build democtl
+        run: make build
+      - name: Initialize host
+        run: sudo ./democtl init
+      - name: Run integration tests
+        run: make integration
 
   build-unittest:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Build democtl
+        run: make build
 
       - name: Initialize host
         run: sudo ./democtl init
@@ -58,37 +68,47 @@ jobs:
         run: |
           sudo ./democtl build unittest --start \
             --size 4000 \
-            --local-vars vars/local_vars_unittest.yml \
-            --fg --repo github.com/chapmanjacobd/iiab --branch rpi_image/genericvm
+            --local-vars vars/local_vars_unittest.yml
 
       - name: Verify build
         run: |
           sudo ./democtl list
           sudo ./democtl status unittest
-          # Check if the build subvolume exists (dereference symlink)
+          # Check if the build subvolume exists
           sudo ls -ld /var/lib/machines/unittest
           sudo test -d /var/lib/machines/unittest
 
       - name: Verify container responds via HTTP
         run: |
           set +e  # Don't exit on curl failure
-          # Wait for container's web server to be ready (may take a few seconds after container starts)
+          # Wait for container's web server to be ready
           echo "Waiting for container HTTP service to be ready..."
           READY=false
-          for i in $(seq 1 30); do
+          CURL_EXIT=1
+          for i in $(seq 1 90); do
             HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
-              -H "Host: unittest.iiab.io" http://10.0.3.2/ 2>/dev/null) || true
+              -H "Host: unittest.iiab.io" http://10.0.3.2/ 2>/dev/null)
+            CURL_EXIT=$?
             if [[ "$HTTP_CODE" =~ ^[1-5][0-9]{2}$ ]]; then
               echo "  Container responding with HTTP $HTTP_CODE (attempt $i)"
               READY=true
               break
             fi
-            echo "  Attempt $i: Container not ready yet (curl exit: $?), waiting 2s..."
+            # Log every 10 attempts to reduce noise, or on first/last attempt
+            if [[ $i -le 3 || $(( i % 10 )) -eq 0 || $i -ge 88 ]]; then
+              echo "  Attempt $i: Container not ready yet (curl exit: $CURL_EXIT, http_code: '$HTTP_CODE'), waiting 2s..."
+              # Quick in-container diagnostics (non-blocking on success)
+              if [[ $(( i % 30 )) -eq 0 ]]; then
+                echo "  --- In-container check (attempt $i) ---"
+                sudo systemd-run --machine=unittest --quiet --wait \
+                  bash -c 'systemctl is-active nginx 2>/dev/null || echo "nginx service unknown"; ss -tln | grep :80 || echo "nothing on :80"' 2>&1 || echo "  (cannot reach container yet)"
+              fi
+            fi
             sleep 2
           done
 
           if ! $READY; then
-            echo "ERROR: Container HTTP service did not become ready after 60s" >&2
+            echo "ERROR: Container HTTP service did not become ready after 180s" >&2
             echo "=== Diagnostic: Ping test ==="
             ping -c 3 -W 2 10.0.3.2 2>&1 || echo "Ping FAILED"
             echo "=== Diagnostic: ARP table ==="
@@ -101,6 +121,12 @@ jobs:
             sudo nft list ruleset 2>&1 || echo "No nftables rules"
             echo "=== Diagnostic: iptables FORWARD chain ==="
             sudo iptables -L FORWARD -n -v 2>&1 || echo "No iptables rules"
+            echo "=== Diagnostic: Storage backend ==="
+            echo "RAMFS mount: $(mountpoint -q /run/iiab-demos/storage && echo YES || echo NO)"
+            echo "Disk mount:  $(mountpoint -q /var/iiab-demos/storage && echo YES || echo NO)"
+            ls -lh /run/iiab-demos/storage.btrfs 2>/dev/null || echo "No RAM btrfs file"
+            ls -lh /var/iiab-demos/storage.btrfs 2>/dev/null || echo "No disk btrfs file"
+            losetup -l 2>&1 || true
             echo "=== Diagnostic: Container status ==="
             sudo ./democtl status unittest 2>&1 || true
             echo "=== Diagnostic: Container interface state (host side) ==="

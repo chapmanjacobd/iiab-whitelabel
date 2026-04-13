@@ -73,7 +73,7 @@ The Debian base is stored once as a read-only subvolume. Each build is a CoW sna
 ### Network & Routing
 
 - Internal: Containers receive unique IPs from `10.0.3.x`
-- External: `nginx-gen.sh` dynamically maps subdomains to container IPs
+- External: `democtl reload` dynamically maps subdomains to container IPs via Nginx templates
 - Isolation: nftables rules block container-to-container traffic while allowing internet access
 
 ## Development & Troubleshooting
