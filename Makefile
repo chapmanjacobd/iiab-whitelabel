@@ -84,12 +84,9 @@ large: build
 	sudo ./$(BINARY) build large --base medium --size 10000 --wildcard --local-vars vars/local_vars_large.yml
 
 small-medium-large: init
-	make small
-	sudo ./$(BINARY) settle
-	make medium
-	sudo ./$(BINARY) settle
-	make large
-	sudo ./$(BINARY) settle
+	sudo make small || true
+	sudo make medium || true
+	sudo make large || true
 	sudo ./$(BINARY) start small medium large
 
 status: build
