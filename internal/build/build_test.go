@@ -121,7 +121,7 @@ func TestConfigStructure(t *testing.T) {
 
 func TestBuildConstants(t *testing.T) {
 	// Verify build constants
-	if build.DebianTarURL != "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-nocloud-amd64.tar.xz" {
+	if build.DebianTarURL != "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.tar.xz" {
 		t.Errorf("unexpected DebianTarURL: %q", build.DebianTarURL)
 	}
 	if build.IIABRepo != "https://github.com/iiab/iiab.git" {

@@ -47,8 +47,8 @@ func ensureBaseSubvolume(ctx context.Context, info *storage.StorageInfo, onDisk 
 		return fmt.Errorf("base subvolume '%s' not found and no alternate storage available", baseSubvol)
 	}
 
-	// Download and extract Debian nocloud image
-	slog.InfoContext(ctx, "Downloading and extracting Debian 13 nocloud image")
+	// Download and extract Debian genericcloud image
+	slog.InfoContext(ctx, "Downloading and extracting Debian 13 genericcloud image")
 
 	// Download tarball into a temp dir
 	tmpdir, mkdirErr := os.MkdirTemp(info.Mount, "debian-base.*")

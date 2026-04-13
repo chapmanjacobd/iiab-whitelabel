@@ -231,7 +231,7 @@ func cleanupEmptyDirs() {
 	}
 
 	// Remove top-level empty directories
-	for _, dir := range []string{"/run/iiab-demos", "/var/iiab-demos"} {
+	for _, dir := range []string{"/run/iiab-demos", "/var/iiab-demos", "/var/lib/iiab-demos"} {
 		if state.FileExists(dir) {
 			if entries, err := os.ReadDir(dir); err == nil && len(entries) == 0 {
 				slog.Info("Removing empty state directory", "path", dir)

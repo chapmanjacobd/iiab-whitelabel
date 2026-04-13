@@ -52,9 +52,9 @@ func TestCrossStorageCopy(t *testing.T) {
 	if !strings.Contains(stdout+stderr, "Copying subvolume from alternate storage") {
 		t.Errorf("expected output to contain 'Copying subvolume from alternate storage', got: %s%s", stdout, stderr)
 	}
-	if strings.Contains(stdout+stderr, "Downloading and extracting Debian 13 nocloud image") {
+	if strings.Contains(stdout+stderr, "Downloading and extracting Debian 13 genericcloud image") {
 		t.Errorf(
-			"expected output to NOT contain 'Downloading and extracting Debian 13 nocloud image', got: %s%s",
+			"expected output to NOT contain 'Downloading and extracting Debian 13 genericcloud image', got: %s%s",
 			stdout,
 			stderr,
 		)

@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	DebianTarURL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-nocloud-amd64.tar.xz"
+	DebianTarURL = "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.tar.xz"
 	IIABRepo     = "https://github.com/iiab/iiab.git"
 
 	// expectTimeout is the default timeout for IIAB install (2 hours)
