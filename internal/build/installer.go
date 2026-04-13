@@ -139,10 +139,18 @@ func runExpectAutomation(ctx context.Context, el *PTYLoop, buildSubvol string, c
 		return finalizeBuild(ctx, el)
 	}
 
-	// Detect incremental vs fresh build from the host
+	// Detect incremental vs fresh build from the host.
+	// A build is incremental if:
+	// 1. The iiab-complete flag exists (previous install completed), OR
+	// 2. STAGE=9 exists in iiab.env (base image already completed all stages).
+	// In both cases, we need to reset STAGE to allow iiab-configure to run.
 	isIncremental := false
 	if _, err := os.Stat(filepath.Join(buildSubvol, "etc/iiab/install-flags/iiab-complete")); err == nil {
 		isIncremental = true
+	} else if stageEnv, err := os.ReadFile(filepath.Join(buildSubvol, "etc/iiab/iiab.env")); err == nil {
+		if strings.Contains(string(stageEnv), "STAGE=9") {
+			isIncremental = true
+		}
 	}
 
 	// Run system updates one by one
@@ -206,26 +214,17 @@ func runExpectAutomation(ctx context.Context, el *PTYLoop, buildSubvol string, c
 		return fmt.Errorf("failed to send installer command: %w", err)
 	}
 
-	_, err := monitorBuild(ctx, el, buildType)
+	sawPhotographed, err := monitorBuild(ctx, el, buildType)
 	if err != nil {
 		return err
 	}
 
-	// After the installer completes, the system may either:
-	// 1. Reboot → show "login: " prompt
-	// 2. Return to shell prompt → no reboot
-	// Wait for whichever comes first.
-	match, _, err := el.WaitForAny([]*regexp.Regexp{
-		regexp.MustCompile(`login:\s*`),
-		rePrompt,
-	}, stepTimeout)
-	if err != nil {
-		return fmt.Errorf("timeout waiting for post-install state: %w", err)
-	}
-
-	// If we got a prompt (no reboot), we're already logged in as root.
-	// If we got "login: ", we need to log in again.
-	if strings.Contains(match, "login:") {
+	// Fresh installs (iiab-install) trigger a system reboot after "photographed".
+	// Incremental builds (iiab-configure) do not reboot.
+	if sawPhotographed {
+		if _, err := el.WaitForString("login: ", stepTimeout); err != nil {
+			return fmt.Errorf("timeout waiting for reboot login prompt: %w", err)
+		}
 		if err := el.SendLine("root"); err != nil {
 			return fmt.Errorf("failed to login after reboot: %w", err)
 		}

@@ -65,3 +65,25 @@ func Output(ctx context.Context, name string, args ...string) (string, error) {
 	}
 	return string(out), nil
 }
+
+// QuietRun runs a command with a 30-minute timeout without logging any output.
+// Use this for commands where stderr output is expected and not an error condition.
+func QuietRun(ctx context.Context, name string, args ...string) error {
+	return QuietRunWithTimeout(ctx, defaultTimeout, name, args...)
+}
+
+// QuietRunWithTimeout runs a command with a custom timeout without logging any output.
+func QuietRunWithTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("command %s failed: %w", name, err)
+	}
+	return nil
+}

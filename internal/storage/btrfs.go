@@ -303,7 +303,9 @@ var SubvolumeDeleteRetryDelay = 2 * time.Second //nolint:gochecknoglobals // int
 // SubvolumeExists checks if a subvolume exists.
 func SubvolumeExists(ctx context.Context, mount, name string) bool {
 	path := filepath.Join(mount, name)
-	return command.Run(ctx, "btrfs", "subvolume", "show", path) == nil
+	// btrfs subvolume show prints to stderr when path doesn't exist,
+	// so we use QuietRun to suppress that expected non-error output.
+	return command.QuietRun(ctx, "btrfs", "subvolume", "show", path) == nil
 }
 
 // CopySubvolumeFromAlternate copies a subvolume from an alternate storage backend.
