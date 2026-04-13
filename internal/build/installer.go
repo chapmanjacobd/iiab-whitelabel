@@ -165,10 +165,8 @@ func runExpectAutomation(ctx context.Context, el *PTYLoop, buildSubvol string, c
 		return err
 	}
 
-	buildType := "fresh"
 	var finalInstallCmd string
 	if isIncremental {
-		buildType = "incremental"
 		slog.InfoContext(ctx, "Incremental build detected from host")
 
 		if err := runStep(
@@ -214,14 +212,13 @@ func runExpectAutomation(ctx context.Context, el *PTYLoop, buildSubvol string, c
 		return fmt.Errorf("failed to send installer command: %w", err)
 	}
 
-	sawPhotographed, err := monitorBuild(ctx, el, buildType)
-	if err != nil {
+	if err := monitorBuild(ctx, el); err != nil {
 		return err
 	}
 
-	// Fresh installs (iiab-install) trigger a system reboot after "photographed".
+	// Fresh installs (iiab-install) trigger a system reboot.
 	// Incremental builds (iiab-configure) do not reboot.
-	if sawPhotographed {
+	if !isIncremental {
 		if _, err := el.WaitForString("login: ", stepTimeout); err != nil {
 			return fmt.Errorf("timeout waiting for reboot login prompt: %w", err)
 		}
@@ -347,11 +344,11 @@ func loginAndPrepare(el *PTYLoop, skipInstall bool) error {
 	return nil
 }
 
-func monitorBuild(ctx context.Context, el *PTYLoop, buildType string) (bool, error) {
+func monitorBuild(ctx context.Context, el *PTYLoop) error {
 	// Single expect loop (like TCL's `expect { ... exp_continue }`).
 	// One read goroutine fills the buffer; we scan all patterns against the
 	// accumulated buffer on each iteration -- no per-call PTY reads.
-	state := &buildState{buildType: buildType, el: el}
+	state := &buildState{el: el}
 	patterns := state.initialPatterns()
 	patternsWithFailed := state.failedPatterns()
 
@@ -368,26 +365,23 @@ func monitorBuild(ctx context.Context, el *PTYLoop, buildType string) (bool, err
 
 		cont, err := state.handleMatch(ctx, match, idx)
 		if err != nil {
-			return false, err
+			return err
 		}
 		if !cont {
-			return state.sawPhotographed, nil
+			return nil
 		}
 	}
 }
 
 // buildState tracks the parsing state for monitorBuild.
 type buildState struct {
-	sawPlayRecap    bool
-	sawPhotographed bool
-	exitCode        string
-	buildType       string
-	el              *PTYLoop
+	sawPlayRecap bool
+	exitCode     string
+	el           *PTYLoop
 }
 
 func (s *buildState) initialPatterns() []*regexp.Regexp {
 	return []*regexp.Regexp{
-		regexp.MustCompile(`photographed`),
 		regexp.MustCompile(`PLAY RECAP`),
 		regexp.MustCompile(`BUILD_EXIT_CODE:([0-9]+)`),
 		rePrompt,
@@ -396,7 +390,6 @@ func (s *buildState) initialPatterns() []*regexp.Regexp {
 
 func (s *buildState) failedPatterns() []*regexp.Regexp {
 	return []*regexp.Regexp{
-		regexp.MustCompile(`photographed`),
 		regexp.MustCompile(`PLAY RECAP`),
 		regexp.MustCompile(`failed=0`),
 		reBuildFailed,
@@ -405,32 +398,25 @@ func (s *buildState) failedPatterns() []*regexp.Regexp {
 	}
 }
 
-func (s *buildState) handleEOF(err error) (bool, error) {
+func (s *buildState) handleEOF(err error) error {
 	if errors.Is(err, io.EOF) {
 		if s.exitCode != "" && s.exitCode == "0" {
-			return s.sawPhotographed, nil
+			return nil
 		}
-		return false, fmt.Errorf("PTY closed before build completed: %w", err)
+		return fmt.Errorf("PTY closed before build completed: %w", err)
 	}
-	return false, fmt.Errorf("timeout during build: %w", err)
+	return fmt.Errorf("timeout during build: %w", err)
 }
 
 // handleMatch processes a pattern match.
 // Returns (continueLoop, error).
 func (s *buildState) handleMatch(ctx context.Context, match string, idx int) (continueLoop bool, _ error) {
 	switch idx {
-	case 0: // photographed
-		if s.buildType == "fresh" {
-			s.sawPhotographed = true
-			_ = s.el.SendLine("\r")
-			return false, nil
-		}
-
-	case 1: // PLAY RECAP
+	case 0: // PLAY RECAP
 		s.sawPlayRecap = true
 		slog.InfoContext(ctx, "Ansible PLAY RECAP section reached")
 
-	case 2: // failed=0 or BUILD_EXIT_CODE
+	case 1: // failed=0 or BUILD_EXIT_CODE
 		if s.sawPlayRecap && strings.Contains(match, "failed=0") {
 			slog.InfoContext(ctx, "PLAY RECAP shows failed=0 (success)")
 			return false, nil
@@ -443,7 +429,7 @@ func (s *buildState) handleMatch(ctx context.Context, match string, idx int) (co
 			slog.InfoContext(ctx, "IIAB build script completed", "exit_code", s.exitCode)
 		}
 
-	case 3: // reBuildFailed or rePrompt
+	case 2: // reBuildFailed or rePrompt
 		if s.sawPlayRecap && reBuildFailed.MatchString(match) {
 			return false, errors.New("IIAB PLAY RECAP shows failures (failed>0)")
 		}
