@@ -211,11 +211,24 @@ func runExpectAutomation(ctx context.Context, el *PTYLoop, buildSubvol string, c
 		return err
 	}
 
-	if _, err := el.WaitForString("login: ", stepTimeout); err != nil {
-		return fmt.Errorf("timeout waiting for reboot login prompt: %w", err)
+	// After the installer completes, the system may either:
+	// 1. Reboot → show "login: " prompt
+	// 2. Return to shell prompt → no reboot
+	// Wait for whichever comes first.
+	match, _, err := el.WaitForAny([]*regexp.Regexp{
+		regexp.MustCompile(`login:\s*`),
+		rePrompt,
+	}, stepTimeout)
+	if err != nil {
+		return fmt.Errorf("timeout waiting for post-install state: %w", err)
 	}
-	if err := el.SendLine("root"); err != nil {
-		return fmt.Errorf("failed to login after reboot: %w", err)
+
+	// If we got a prompt (no reboot), we're already logged in as root.
+	// If we got "login: ", we need to log in again.
+	if strings.Contains(match, "login:") {
+		if err := el.SendLine("root"); err != nil {
+			return fmt.Errorf("failed to login after reboot: %w", err)
+		}
 	}
 
 	return finalizeBuild(ctx, el)
