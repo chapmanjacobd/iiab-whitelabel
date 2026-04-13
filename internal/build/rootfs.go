@@ -183,6 +183,22 @@ func setupContainerNetworking(buildSubvol, ip string) error {
 		return err
 	}
 
+	// Mask default container network files from /usr/lib/systemd/network/
+	// so they don't interfere with our custom configuration.
+	// Systemd-networkd picks the first matching file by sort order, and
+	// 80-container-host0.network would match before our 99-iiab-host0.network.
+	for _, defaultFile := range []string{
+		"80-container-host0.network",
+		"80-container-vb.network",
+	} {
+		maskPath := filepath.Join(networkDir, defaultFile)
+		os.Remove(maskPath) // Remove if it exists (could be a broken symlink)
+		if err := os.Symlink("/dev/null", maskPath); err != nil {
+			return fmt.Errorf("failed to mask %s: %w", defaultFile, err)
+		}
+		slog.Info("Masked default network file", "path", maskPath)
+	}
+
 	networkContent := fmt.Sprintf(`[Match]
 Kind=veth
 Name=host0
@@ -199,6 +215,7 @@ DNS=1.1.1.1
 	if err := os.WriteFile(networkFile, []byte(networkContent), 0o644); err != nil {
 		return err
 	}
+	slog.Info("Wrote container network configuration", "path", networkFile, "ip", ip, "gateway", Gateway)
 
 	// Write fallback one-shot service
 	serviceDir := filepath.Join(buildSubvol, "etc/systemd/system")

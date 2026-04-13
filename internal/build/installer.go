@@ -31,6 +31,13 @@ const stepTimeout = 7200 * time.Second
 // runIIABInstaller runs the IIAB installer inside the container using a buffered
 // PTY expect loop for automated interaction with systemd-nspawn.
 func runIIABInstaller(buildCtx context.Context, buildSubvol string, cfg Config) error {
+	// Verify networking config exists
+	networkFile := filepath.Join(buildSubvol, "etc/systemd/network/99-iiab-host0.network")
+	if _, err := os.Stat(networkFile); err != nil {
+		return fmt.Errorf("container network config not found at %s: %w", networkFile, err)
+	}
+	slog.InfoContext(buildCtx, "Verified container network config exists", "path", networkFile)
+
 	// Setup bridge networking
 	if err := network.SetupBridge(buildCtx, cfg.System); err != nil {
 		return fmt.Errorf("bridge setup failed: %w", err)

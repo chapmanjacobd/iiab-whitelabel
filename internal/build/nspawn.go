@@ -31,6 +31,7 @@ NoNewPrivileges=false
 [Network]
 Bridge=` + network.BridgeName + `
 VirtualEthernet=true
+ResolvConf=off
 `
 
 	nspawnFile := filepath.Join(sys.NspawnDir, name+".nspawn")
