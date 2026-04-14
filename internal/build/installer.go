@@ -2,9 +2,7 @@ package build
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -19,10 +17,8 @@ import (
 
 // Pre-compiled regexes for build output parsing.
 var (
-	reBuildFailed   = regexp.MustCompile(`failed=[1-9][0-9]*`)
-	reBuildExitCode = regexp.MustCompile(`BUILD_EXIT_CODE:([0-9]+)`)
-	reExitCode      = regexp.MustCompile(`EXIT_CODE:([0-9]+)`)
-	rePrompt        = regexp.MustCompile(`(?m)#\s*$`) // (?m) makes $ match end-of-line, not end-of-string
+	reExitCode = regexp.MustCompile(`EXIT_CODE:([0-9]+)`)
+	rePrompt   = regexp.MustCompile(`(?m)#\s*$`) // (?m) makes $ match end-of-line, not end-of-string
 )
 
 // Timeout used for individual expect operations.
@@ -208,11 +204,7 @@ func runExpectAutomation(ctx context.Context, el *PTYLoop, buildSubvol string, c
 	}
 
 	// Run final installer command
-	if err := el.SendLine(finalInstallCmd + "; echo \"BUILD_EXIT_CODE:$?\""); err != nil {
-		return fmt.Errorf("failed to send installer command: %w", err)
-	}
-
-	if err := monitorBuild(ctx, el); err != nil {
+	if err := runStep(el, finalInstallCmd, "IIAB installation failed"); err != nil {
 		return err
 	}
 
@@ -264,38 +256,23 @@ func loginAndPrepare(el *PTYLoop, skipInstall bool) error {
 		return fmt.Errorf("timeout waiting for root prompt: %w", err)
 	}
 
-	// Set environment variables to disable terminal noise and interactive prompts
-	if err := el.SendLine(
-		"export PAGER=cat SYSTEMD_PAGER=cat TERM=dumb GIT_PROGRESS_DELAY=0 GIT_TERMINAL_PROMPT=0 ANSIBLE_NOCOLOR=1 DEBIAN_FRONTEND=noninteractive",
-	); err != nil {
-		return fmt.Errorf("failed to set environment variables: %w", err)
-	}
-	if _, _, err := el.WaitForAny([]*regexp.Regexp{rePrompt}, stepTimeout); err != nil {
-		return fmt.Errorf("timeout after environment set: %w", err)
-	}
-
-	// Install git if not present, then silence it
-	if err := el.SendLine(
-		"command -v git >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1; }",
-	); err != nil {
-		return fmt.Errorf("failed to send git installation check: %w", err)
-	}
-	if _, _, err := el.WaitForAny([]*regexp.Regexp{rePrompt}, stepTimeout); err != nil {
-		return fmt.Errorf("timeout after git installation: %w", err)
+	// Set environment variables and install git
+	prepCmd := "export PAGER=cat SYSTEMD_PAGER=cat TERM=dumb GIT_PROGRESS_DELAY=0 GIT_TERMINAL_PROMPT=0 ANSIBLE_NOCOLOR=1 DEBIAN_FRONTEND=noninteractive && " +
+		"command -v git >/dev/null 2>&1 || { apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1; }"
+	if err := runStep(el, prepCmd, "Environment preparation failed"); err != nil {
+		return err
 	}
 
 	// Silence git (ignore errors -- these are best-effort)
-	_ = el.SendLine("git config --global core.pager cat 2>/dev/null")
-	_ = el.AwaitPrompt(stepTimeout)
-	_ = el.SendLine("git config --global core.progress false 2>/dev/null")
-	_ = el.AwaitPrompt(stepTimeout)
-	_ = el.SendLine("git config --global advice.detachedHead false 2>/dev/null")
-	_ = el.AwaitPrompt(stepTimeout)
-	_ = el.SendLine("git config --global report.status false")
-	_ = el.AwaitPrompt(stepTimeout)
-	_ = el.SendLine("git config --global fetch.showForcedUpdates false")
-	_ = el.AwaitPrompt(stepTimeout)
-	_ = el.SendLine("git config --global core.checkStat minimal")
+	gitCmds := []string{
+		"git config --global core.pager cat",
+		"git config --global core.progress false",
+		"git config --global advice.detachedHead false",
+		"git config --global report.status false",
+		"git config --global fetch.showForcedUpdates false",
+		"git config --global core.checkStat minimal",
+	}
+	_ = el.SendLine(strings.Join(gitCmds, " && ") + " 2>/dev/null")
 	_ = el.AwaitPrompt(stepTimeout)
 
 	if skipInstall {
@@ -310,125 +287,9 @@ func loginAndPrepare(el *PTYLoop, skipInstall bool) error {
 		return fmt.Errorf("timeout after ssh-keygen: %w", err)
 	}
 
-	// Wait for network readiness (poll for default route)
-	if err := el.SendLine(
-		"for i in $(seq 1 30); do ip route | grep -q default && break; sleep 1; done",
-	); err != nil {
-		return fmt.Errorf("failed to send network check: %w", err)
-	}
-	if _, _, err := el.WaitForAny([]*regexp.Regexp{rePrompt}, stepTimeout); err != nil {
-		return fmt.Errorf("timeout waiting for network check: %w", err)
-	}
-
-	// Verify network is functional
-	if err := el.SendLine(
-		"ip route | grep -q default || { echo 'ERROR: No default route' >&2; exit 1; }",
-	); err != nil {
-		return fmt.Errorf("failed to send network verify: %w", err)
-	}
-	if _, _, err := el.WaitForAny([]*regexp.Regexp{rePrompt}, stepTimeout); err != nil {
-		return fmt.Errorf("timeout waiting for network verify: %w", err)
-	}
-
-	return nil
-}
-
-func monitorBuild(ctx context.Context, el *PTYLoop) error {
-	// Single expect loop (like TCL's `expect { ... exp_continue }`).
-	// One read goroutine fills the buffer; we scan all patterns against the
-	// accumulated buffer on each iteration -- no per-call PTY reads.
-	state := &buildState{el: el}
-	patterns := state.initialPatterns()
-	patternsWithFailed := state.failedPatterns()
-
-	for {
-		current := patterns
-		if state.sawPlayRecap {
-			current = patternsWithFailed
-		}
-
-		match, idx, err := el.WaitForAny(current, stepTimeout)
-		if err != nil {
-			return state.handleEOF(err)
-		}
-
-		cont, err := state.handleMatch(ctx, match, idx)
-		if err != nil {
-			return err
-		}
-		if !cont {
-			return nil
-		}
-	}
-}
-
-// buildState tracks the parsing state for monitorBuild.
-type buildState struct {
-	sawPlayRecap bool
-	exitCode     string
-	el           *PTYLoop
-}
-
-func (s *buildState) initialPatterns() []*regexp.Regexp {
-	return []*regexp.Regexp{
-		regexp.MustCompile(`PLAY RECAP`),
-		regexp.MustCompile(`BUILD_EXIT_CODE:([0-9]+)`),
-		rePrompt,
-	}
-}
-
-func (s *buildState) failedPatterns() []*regexp.Regexp {
-	return []*regexp.Regexp{
-		regexp.MustCompile(`PLAY RECAP`),
-		regexp.MustCompile(`failed=0`),
-		reBuildFailed,
-		regexp.MustCompile(`BUILD_EXIT_CODE:([0-9]+)`),
-		rePrompt,
-	}
-}
-
-func (s *buildState) handleEOF(err error) error {
-	if errors.Is(err, io.EOF) {
-		if s.exitCode != "" && s.exitCode == "0" {
-			return nil
-		}
-		return fmt.Errorf("PTY closed before build completed: %w", err)
-	}
-	return fmt.Errorf("timeout during build: %w", err)
-}
-
-// handleMatch processes a pattern match.
-// Returns (continueLoop, error).
-func (s *buildState) handleMatch(ctx context.Context, match string, idx int) (continueLoop bool, _ error) {
-	switch idx {
-	case 0: // PLAY RECAP
-		s.sawPlayRecap = true
-		slog.InfoContext(ctx, "Ansible PLAY RECAP section reached")
-
-	case 1: // failed=0 or BUILD_EXIT_CODE
-		if s.sawPlayRecap && strings.Contains(match, "failed=0") {
-			slog.InfoContext(ctx, "PLAY RECAP shows failed=0 (success)")
-			return false, nil
-		}
-		if m := reBuildExitCode.FindStringSubmatch(match); m != nil {
-			s.exitCode = m[1]
-			if s.exitCode != "0" {
-				return false, fmt.Errorf("IIAB build script failed with exit code: %s", s.exitCode)
-			}
-			slog.InfoContext(ctx, "IIAB build script completed", "exit_code", s.exitCode)
-		}
-
-	case 2: // reBuildFailed or rePrompt
-		if s.sawPlayRecap && reBuildFailed.MatchString(match) {
-			return false, errors.New("IIAB PLAY RECAP shows failures (failed>0)")
-		}
-		if s.exitCode == "" {
-			return true, nil // still waiting for BUILD_EXIT_CODE
-		}
-		return false, nil // build complete
-	}
-
-	return true, nil
+	// Wait for and verify network readiness
+	netCmd := "for i in $(seq 1 30); do ip route | grep -q default && break; sleep 1; done; ip route | grep -q default || { echo 'ERROR: No default route' >&2; exit 1; }"
+	return runStep(el, netCmd, "Network verification failed")
 }
 
 func finalizeBuild(ctx context.Context, el *PTYLoop) error {
