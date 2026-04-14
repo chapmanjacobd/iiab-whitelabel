@@ -79,9 +79,9 @@ func TestMainConfigStructure(t *testing.T) {
 }
 
 func TestMainConfigWildcardSupport(t *testing.T) {
-	// Verify main config handles wildcard demos
-	if !strings.Contains(nginx.MainConfig, "{{if .Wildcard}}") {
-		t.Error("expected main config to contain wildcard conditional")
+	// Verify main config handles wildcard demos with SSL check
+	if !strings.Contains(nginx.MainConfig, ".Wildcard.HasSSL") {
+		t.Error("expected main config to contain wildcard HasSSL conditional")
 	}
 	if !strings.Contains(nginx.MainConfig, "return 302") {
 		t.Error("expected main config to contain 'return 302'")

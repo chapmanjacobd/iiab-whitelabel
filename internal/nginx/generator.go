@@ -99,11 +99,7 @@ func hasValidCert(subdomain string) bool {
 	return len(fullData) > 0
 }
 
-func collectDemoEntries(
-	ctx context.Context,
-	stateDir string,
-	names []string,
-) ([]DemoEntry, *DemoEntry) {
+func collectDemoEntries(ctx context.Context, stateDir string, names []string) ([]DemoEntry, *DemoEntry) {
 	var entries []DemoEntry
 	var wildcardFound *DemoEntry
 
@@ -228,7 +224,7 @@ server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
-    {{if and .Wildcard .HasSSL}}
+    {{if and .Wildcard .Wildcard.HasSSL}}
     return 302 https://{{.Wildcard.Subdomain}}.iiab.io$request_uri;
     {{else}}
     return 404;
@@ -286,7 +282,7 @@ server {
 {{end}}
 
 # HTTPS fallback catch-all
-{{if and .Wildcard .HasSSL}}
+{{if and .Wildcard .Wildcard.HasSSL}}
 server {
     listen 443 ssl default_server;
     listen [::]:443 ssl default_server;
