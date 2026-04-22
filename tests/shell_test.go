@@ -12,11 +12,9 @@ import (
 )
 
 func TestShellCommand(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Fatal("this test must be run as root (use sudo go test ./tests/...)")
-	}
+	requireRoot(t)
 	stateDir := setupStateDir(t)
-	name := "shell-demo"
+	name := uniqueDemoName("shell-demo")
 
 	// 0. Cleanup on exit
 	defer runDemoctl(t, stateDir, "delete", name)

@@ -9,10 +9,11 @@ func TestCrossStorageCopy(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
+	requireRoot(t)
 
 	stateDir := setupStateDir(t)
-	ramDemo := "ram-base"
-	diskDemo := "disk-derived"
+	ramDemo := uniqueDemoName("ram-base")
+	diskDemo := uniqueDemoName("disk-derived")
 
 	// Ensure clean slate for storage
 	_, stderr, err := runDemoctl(t, stateDir, "cleanup", "--all")

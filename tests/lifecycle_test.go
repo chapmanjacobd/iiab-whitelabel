@@ -8,8 +8,9 @@ import (
 )
 
 func TestLifecycleCommand(t *testing.T) {
+	requireRoot(t)
 	stateDir := setupStateDir(t)
-	name := "demo-lifecycle"
+	name := uniqueDemoName("demo-lifecycle")
 
 	// 1. Build
 	stdout, stderr, err := runDemoctl(t, stateDir, "build", name, "--skip-install")

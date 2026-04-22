@@ -102,9 +102,7 @@ func checkNginxConfig(t *testing.T, stateDir, name string) {
 }
 
 func TestIntegration_BuildStatusListReload(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Fatal("this test must be run as root (use sudo go test ./tests/...)")
-	}
+	requireRoot(t)
 	stateDir := setupStateDir(t)
 
 	// --- TestList: empty list ---
@@ -114,7 +112,7 @@ func TestIntegration_BuildStatusListReload(t *testing.T) {
 	checkDemoListHelp(t)
 
 	// --- Build a shared demo ---
-	name := "integration-demo"
+	name := uniqueDemoName("integration-demo")
 	_, _, err := runDemoctl(t, stateDir, "build", name, "--skip-install")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

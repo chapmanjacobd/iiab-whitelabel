@@ -2,6 +2,7 @@ package tests_test
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -110,6 +111,17 @@ func newDemoctlCommand(t *testing.T, stateDir string, args ...string) *exec.Cmd 
 
 func setupStateDir(t *testing.T) string {
 	return t.TempDir()
+}
+
+func requireRoot(t *testing.T) {
+	t.Helper()
+	if os.Geteuid() != 0 {
+		t.Skip("requires root (run with sudo go test ./tests/...)")
+	}
+}
+
+func uniqueDemoName(prefix string) string {
+	return fmt.Sprintf("%s-%x", prefix, time.Now().UnixNano())
 }
 
 type statusOutput struct {

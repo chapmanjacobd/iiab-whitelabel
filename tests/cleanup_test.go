@@ -9,11 +9,9 @@ import (
 )
 
 func TestCleanupCommand(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Fatal("this test must be run as root (use sudo go test ./tests/...)")
-	}
+	requireRoot(t)
 	stateDir := setupStateDir(t)
-	name := "failed-demo"
+	name := uniqueDemoName("failed-demo")
 
 	// 1. Initialize a demo
 	_, _, err := runDemoctl(t, stateDir, "build", name, "--skip-install")

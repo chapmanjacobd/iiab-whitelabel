@@ -11,11 +11,9 @@ import (
 )
 
 func TestReconcileCommand(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Fatal("this test must be run as root (use sudo go test ./tests/...)")
-	}
+	requireRoot(t)
 	stateDir := setupStateDir(t)
-	name := "reconcile-demo"
+	name := uniqueDemoName("reconcile-demo")
 
 	// 1. Initialize a demo with 15000 MB size
 	_, _, err := runDemoctl(t, stateDir, "build", name, "--skip-install", "--size", "15000")

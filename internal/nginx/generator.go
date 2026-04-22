@@ -66,16 +66,12 @@ func Generate(ctx context.Context, stateDir string) error {
 	}
 
 	entries, wildcardFound := collectDemoEntries(ctx, stateDir, names)
-
-	// Generate config
-	var tmplStr string
-	if len(entries) == 0 {
-		tmplStr = FallbackConfig
-	} else {
-		tmplStr = MainConfig
+	renderedConfig, err := renderConfig(entries, wildcardFound)
+	if err != nil {
+		return err
 	}
 
-	return writeAndReloadConfig(ctx, tmplStr, entries, wildcardFound)
+	return writeAndReloadConfig(ctx, renderedConfig)
 }
 
 func hasValidCert(subdomain string) bool {
@@ -137,15 +133,15 @@ func collectDemoEntries(ctx context.Context, stateDir string, names []string) ([
 	return entries, wildcardFound
 }
 
-func writeAndReloadConfig(
-	ctx context.Context,
-	tmplStr string,
-	entries []DemoEntry,
-	wildcard *DemoEntry,
-) error {
+func renderConfig(entries []DemoEntry, wildcard *DemoEntry) (string, error) {
+	tmplStr := MainConfig
+	if len(entries) == 0 {
+		tmplStr = FallbackConfig
+	}
+
 	tmpl, err := template.New("nginx").Parse(tmplStr)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var buf strings.Builder
@@ -160,12 +156,16 @@ func writeAndReloadConfig(
 		BridgeName: network.BridgeName,
 		Gateway:    network.Gateway,
 	}); e != nil {
-		return e
+		return "", e
 	}
 
+	return buf.String(), nil
+}
+
+func writeAndReloadConfig(ctx context.Context, renderedConfig string) error {
 	configPath, enabledPath := GetNginxPaths()
 
-	if e := os.WriteFile(configPath, []byte(buf.String()), 0o644); e != nil {
+	if e := os.WriteFile(configPath, []byte(renderedConfig), 0o644); e != nil {
 		return fmt.Errorf("cannot write nginx config: %w", e)
 	}
 

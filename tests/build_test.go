@@ -10,12 +10,10 @@ import (
 )
 
 func TestBuildCommand(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Fatal("this test must be run as root (use sudo go test ./tests/...)")
-	}
+	requireRoot(t)
 
 	stateDir := setupStateDir(t)
-	name := "test-demo"
+	name := uniqueDemoName("test-demo")
 
 	// Cleanup storage on exit
 	defer runDemoctl(t, stateDir, "delete", name)
@@ -71,8 +69,8 @@ func TestBuildCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if demo.Name != "test-demo" {
-		t.Errorf("expected name 'test-demo', got %q", demo.Name)
+	if demo.Name != name {
+		t.Errorf("expected name %q, got %q", name, demo.Name)
 	}
 	// image_size_mb is updated to actual used space after build (should be between 500MB and 1GB for skip-install)
 	if demo.ImageSizeMB < 500 {
